@@ -1,0 +1,11 @@
+services:
+  ollama-ui:
+    build: .
+    container_name: ollama-ui
+    restart: unless-stopped
+    # Host networking lets the container reach Ollama on 127.0.0.1:11434
+    # without reconfiguring Ollama to listen on all interfaces.
+    network_mode: host
+    environment:
+      OLLAMA_URL: http://127.0.0.1:11434
+      LISTEN_PORT: 3000
