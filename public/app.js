@@ -5,10 +5,13 @@
 const STORAGE_KEY = 'ollama-ui:v1';
 
 const state = {
-  chats: [],          // [{ id, title, model, messages: [{ role, content, thinking?, images? }] }]
+  chats: [],          // [{ id, title, model, messages: [{ role, content, thinking?, images?, imageFormat? }] }]
   currentId: null,
-  models: [],         // [{ name, capabilities: [] }]
-  settings: { model: '', systemPrompt: '', temperature: 0.7, showThinking: true },
+  models: [],         // [{ name, label?, capabilities: [] }] — image models have the 'image' capability
+  settings: {
+    model: '', systemPrompt: '', temperature: 0.7, showThinking: true,
+    imageSize: '1024x1024', freeVram: true,
+  },
 };
 
 let pendingImages = [];   // base64 strings (no data: prefix) for the next message
@@ -38,6 +41,7 @@ function save() {
 const currentChat = () => state.chats.find(c => c.id === state.currentId) || null;
 const modelInfo = name => state.models.find(m => m.name === name);
 const hasCapability = (name, cap) => (modelInfo(name)?.capabilities || []).includes(cap);
+const isImageModel = name => hasCapability(name, 'image');
 
 // ---------- DOM ----------
 
@@ -49,7 +53,8 @@ const els = {
   fileInput: $('fileInput'), attachLabel: $('attachLabel'), attachments: $('attachments'),
   settingsBtn: $('settingsBtn'), settingsDialog: $('settingsDialog'),
   systemPrompt: $('systemPrompt'), temperature: $('temperature'), tempValue: $('tempValue'),
-  showThinking: $('showThinking'), clearAll: $('clearAll'),
+  showThinking: $('showThinking'), imageSize: $('imageSize'), freeVram: $('freeVram'),
+  clearAll: $('clearAll'),
 };
 
 // ---------- Markdown rendering ----------
@@ -214,11 +219,34 @@ function buildMessage(msg, isLast) {
 
   const actions = document.createElement('div');
   actions.className = 'msg-actions';
-  const copy = document.createElement('button');
-  copy.type = 'button';
-  copy.textContent = 'Copy';
-  copy.addEventListener('click', () => copyText(msg.content, copy));
-  actions.append(copy);
+  if (msg.images?.length) {
+    const generated = document.createElement('div');
+    generated.className = 'generated-images';
+    msg.images.forEach((b64, i) => {
+      const src = `data:image/${msg.imageFormat || 'png'};base64,${b64}`;
+      const img = document.createElement('img');
+      img.src = src;
+      img.alt = 'Generated image';
+      generated.append(img);
+      const download = document.createElement('button');
+      download.type = 'button';
+      download.textContent = msg.images.length > 1 ? `Download ${i + 1}` : 'Download';
+      download.addEventListener('click', () => {
+        const a = document.createElement('a');
+        a.href = src;
+        a.download = `image-${Date.now()}.${msg.imageFormat === 'jpeg' ? 'jpg' : msg.imageFormat || 'png'}`;
+        a.click();
+      });
+      actions.append(download);
+    });
+    content.before(generated);
+  } else {
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.textContent = 'Copy';
+    copy.addEventListener('click', () => copyText(msg.content, copy));
+    actions.append(copy);
+  }
   if (isLast) {
     const regen = document.createElement('button');
     regen.type = 'button';
@@ -289,15 +317,17 @@ async function sendMessage(text) {
   state.chats = [chat, ...state.chats.filter(c => c !== chat)];
   save();
   renderChatList();
-  await streamReply(chat);
+  await respond(chat);
 }
 
 async function regenerate() {
   const chat = currentChat();
   if (!chat || abortController) return;
   if (chat.messages.at(-1)?.role === 'assistant') chat.messages.pop();
-  await streamReply(chat);
+  await respond(chat);
 }
+
+const respond = chat => (isImageModel(chat.model) ? generateImage(chat) : streamReply(chat));
 
 async function streamReply(chat) {
   const model = chat.model;
@@ -308,6 +338,9 @@ async function streamReply(chat) {
   el.querySelector('.msg-actions').style.display = 'none';
 
   const history = chat.messages.slice(0, -1).map(m => {
+    if (m.role === 'assistant' && m.images?.length) {
+      return { role: 'assistant', content: '[Generated an image for the previous message]' };
+    }
     const out = { role: m.role, content: m.content };
     if (m.images) out.images = m.images;
     return out;
@@ -385,6 +418,115 @@ async function streamReply(chat) {
   }
 }
 
+// ---------- Image generation (stable-diffusion.cpp) ----------
+
+async function generateImage(chat) {
+  const prompt = chat.messages.findLast(m => m.role === 'user')?.content || '';
+  const reply = { role: 'assistant', content: '', images: [] };
+  chat.messages.push(reply);
+  renderMessages();
+  const el = [...els.messages.querySelectorAll('.msg')].at(-1);
+  el.querySelector('.msg-actions').style.display = 'none';
+  const content = el.querySelector('.content');
+  content.innerHTML = '<div class="image-pending"><div class="spinner"></div><span></span></div>';
+  const status = content.querySelector('span');
+
+  abortController = new AbortController();
+  const { signal } = abortController;
+  setStreaming(true);
+  const started = Date.now();
+  let jobId = null;
+
+  try {
+    if (state.settings.freeVram) {
+      status.textContent = 'Unloading chat models…';
+      await unloadOllamaModels();
+    }
+    status.textContent = 'Starting…';
+    const [width, height] = state.settings.imageSize.split('x').map(Number);
+    const job = await fetchJson('/sdcpp/v1/img_gen', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      // Steps, CFG and sampler come from the server's defaults for the loaded model.
+      body: JSON.stringify({
+        prompt, width, height, seed: -1, output_format: 'jpeg', output_compression: 92,
+      }),
+      signal,
+    });
+    jobId = job.id;
+
+    while (true) {
+      const s = await fetchJson(`/sdcpp/v1/jobs/${jobId}`, { signal });
+      if (s.status === 'completed') {
+        reply.images = s.result.images.map(img => img.b64_json);
+        reply.imageFormat = s.result.output_format;
+        break;
+      }
+      if (s.status === 'failed' || s.status === 'cancelled') {
+        throw new Error(s.error?.message || `Image generation ${s.status}`);
+      }
+      const secs = Math.round((Date.now() - started) / 1000);
+      status.textContent = s.status === 'queued'
+        ? `Queued (position ${s.queue_position})…`
+        : `Generating image… ${secs}s`;
+      await sleep(1000, signal);
+    }
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      // The server can only cancel queued jobs; a running one finishes and is discarded.
+      if (jobId) fetch(`/sdcpp/v1/jobs/${jobId}/cancel`, { method: 'POST' }).catch(() => {});
+    } else {
+      reply.error = err.message;
+    }
+  } finally {
+    abortController = null;
+    setStreaming(false);
+    if (!reply.images.length) {
+      delete reply.images;
+      if (!reply.error) reply.content = '_(stopped)_';
+    }
+    save();
+    renderMessages();
+  }
+}
+
+// Ollama keeps chat models in VRAM for a few minutes after use; evict them so
+// the image model has the GPU to itself.
+async function unloadOllamaModels() {
+  try {
+    const { models = [] } = await fetchJson('/api/ps');
+    await Promise.all(models.map(m => fetch('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: m.name, keep_alive: 0 }),
+    })));
+  } catch (err) {
+    console.warn('Could not unload Ollama models:', err);
+  }
+}
+
+async function fetchJson(url, options) {
+  const res = await fetch(url, options);
+  const text = await res.text();
+  let data = null;
+  try { data = JSON.parse(text); } catch { /* not JSON */ }
+  if (!res.ok) {
+    const message = data?.error?.message || data?.error || text;
+    throw new Error(message || `HTTP ${res.status}`);
+  }
+  return data;
+}
+
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener('abort', () => {
+      clearTimeout(timer);
+      reject(new DOMException('Aborted', 'AbortError'));
+    }, { once: true });
+  });
+}
+
 function stopStreaming() {
   abortController?.abort();
 }
@@ -402,18 +544,33 @@ function updateSendButton() {
 
 // ---------- Models ----------
 
-async function loadModels() {
+async function loadChatModels() {
   try {
-    const res = await fetch('/api/tags');
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    state.models = (data.models || [])
+    const data = await fetchJson('/api/tags');
+    return (data.models || [])
       .map(m => ({ name: m.name, capabilities: m.capabilities || [] }))
       .sort((a, b) => a.name.localeCompare(b.name));
   } catch (err) {
-    state.models = [];
-    console.error('Could not load models:', err);
+    console.error('Could not load Ollama models:', err);
+    return [];
   }
+}
+
+// The image server loads a single model at startup; offer it if it's up.
+async function loadImageModels() {
+  try {
+    const caps = await fetchJson('/sdcpp/v1/capabilities');
+    if (!caps.supported_modes?.includes('img_gen')) return [];
+    return [{ name: `image:${caps.model.stem}`, label: caps.model.stem, capabilities: ['image'] }];
+  } catch (err) {
+    console.info('Image server unavailable:', err.message);
+    return [];
+  }
+}
+
+async function loadModels() {
+  const [chatModels, imageModels] = await Promise.all([loadChatModels(), loadImageModels()]);
+  state.models = [...chatModels, ...imageModels];
 
   els.modelSelect.innerHTML = '';
   if (!state.models.length) {
@@ -422,18 +579,27 @@ async function loadModels() {
     state.settings.model = '';
     return;
   }
-  for (const m of state.models) els.modelSelect.append(new Option(m.name, m.name));
+  for (const [label, models] of [['Chat', chatModels], ['Image', imageModels]]) {
+    if (!models.length) continue;
+    const group = document.createElement('optgroup');
+    group.label = label;
+    for (const m of models) group.append(new Option(m.label || m.name, m.name));
+    els.modelSelect.append(group);
+  }
   if (!modelInfo(state.settings.model)) state.settings.model = state.models[0].name;
   els.modelSelect.value = state.settings.model;
-  updateAttachVisibility();
+  updateComposerForModel();
 }
 
-function updateAttachVisibility() {
+function updateComposerForModel() {
   // /api/tags only reports capabilities on newer Ollama; if absent, allow attaching.
   const info = modelInfo(state.settings.model);
   const vision = !info?.capabilities.length || info.capabilities.includes('vision');
   els.attachLabel.style.display = vision ? '' : 'none';
   if (!vision) clearAttachments();
+  els.input.placeholder = isImageModel(state.settings.model)
+    ? 'Describe an image to generate'
+    : 'Message Ollama';
 }
 
 // ---------- Attachments ----------
@@ -482,6 +648,8 @@ function openSettings() {
   els.temperature.value = state.settings.temperature;
   els.tempValue.textContent = state.settings.temperature;
   els.showThinking.checked = state.settings.showThinking;
+  els.imageSize.value = state.settings.imageSize;
+  els.freeVram.checked = state.settings.freeVram;
   els.settingsDialog.showModal();
 }
 
@@ -493,6 +661,8 @@ els.settingsDialog.addEventListener('close', () => {
   state.settings.systemPrompt = els.systemPrompt.value;
   state.settings.temperature = Number(els.temperature.value);
   state.settings.showThinking = els.showThinking.checked;
+  state.settings.imageSize = els.imageSize.value;
+  state.settings.freeVram = els.freeVram.checked;
   save();
   renderMessages();
 });
@@ -555,7 +725,7 @@ els.fileInput.addEventListener('change', () => {
 els.modelSelect.addEventListener('change', () => {
   state.settings.model = els.modelSelect.value;
   save();
-  updateAttachVisibility();
+  updateComposerForModel();
 });
 
 els.newChat.addEventListener('click', newChat);

@@ -64,6 +64,17 @@
       <label class="checkbox">
         <input type="checkbox" id="showThinking"> Show model thinking (for reasoning models)
       </label>
+      <label>Image size
+        <select id="imageSize">
+          <option value="1024x1024">Square (1024 × 1024)</option>
+          <option value="1216x832">Landscape (1216 × 832)</option>
+          <option value="832x1216">Portrait (832 × 1216)</option>
+          <option value="512x512">Small (512 × 512)</option>
+        </select>
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" id="freeVram"> Unload chat models before generating images (frees GPU memory)
+      </label>
       <div class="dialog-actions">
         <button value="clear" class="danger" id="clearAll" type="button">Delete all chats</button>
         <button value="close">Done</button>

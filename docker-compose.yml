@@ -8,4 +8,68 @@ services:
     network_mode: host
     environment:
       OLLAMA_URL: http://127.0.0.1:11434
+      SD_URL: http://127.0.0.1:7861
       LISTEN_PORT: 3000
+
+  # One-shot job: downloads the image model weights into the `image-models`
+  # volume on first run, and skips files that are already there.
+  image-models:
+    image: curlimages/curl:8.10.1
+    user: root
+    volumes:
+      - image-models:/models
+      - ./image-server/fetch-models.sh:/fetch-models.sh:ro
+    entrypoint: ["/bin/sh", "/fetch-models.sh"]
+
+  # stable-diffusion.cpp image server running Z-Image-Turbo on the GPU.
+  image-server:
+    build:
+      context: https://github.com/leejet/stable-diffusion.cpp.git#3f8527a46c54ecf4cb4ed6003da8e8982283c73c
+      dockerfile: docker/Dockerfile.cuda
+      args:
+        # Compile CUDA kernels only for this GPU (86 = RTX 30xx). 89 = RTX 40xx, 120 = RTX 50xx.
+        CUDA_ARCHITECTURES: ${SD_CUDA_ARCH:-86}
+    image: sd-server-cuda:3f8527a
+    container_name: image-server
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      image-models:
+        condition: service_completed_successfully
+    volumes:
+      - image-models:/models:ro
+    entrypoint: ["/sd-server"]
+    command:
+      - --listen-ip
+      - "127.0.0.1"
+      - --listen-port
+      - "7861"
+      - --diffusion-model
+      - /models/z_image_turbo-Q6_K.gguf
+      - --llm
+      - /models/Qwen3-4B-Instruct-2507-Q8_0.gguf
+      - --vae
+      - /models/ae.safetensors
+      # Z-Image-Turbo is distilled: 8 steps with no CFG.
+      - --steps
+      - "8"
+      - --cfg-scale
+      - "1.0"
+      - --width
+      - "1024"
+      - --height
+      - "1024"
+      - --diffusion-fa
+      # Keep weights in system RAM and move them to the GPU only while
+      # generating, so the GPU stays free for Ollama the rest of the time.
+      - --offload-to-cpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  image-models:

@@ -260,3 +260,27 @@ dialog::backdrop { background: rgba(0, 0, 0, .6); }
   .sidebar { position: fixed; z-index: 10; height: 100%; }
   .msg.user .bubble { max-width: 90%; }
 }
+
+/* ---------- Generated images ---------- */
+.generated-images { display: flex; flex-direction: column; gap: 8px; }
+.generated-images img {
+  max-width: 100%; max-height: 70vh;
+  width: fit-content;
+  border-radius: 12px;
+}
+.image-pending {
+  display: flex; align-items: center; gap: 12px;
+  color: var(--muted); font-size: 14px;
+}
+.spinner {
+  width: 18px; height: 18px;
+  border: 2px solid var(--border);
+  border-top-color: var(--text);
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.settings select {
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px;
+}
