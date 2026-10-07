@@ -60,6 +60,9 @@ services:
       - --height
       - "1024"
       - --diffusion-fa
+      # ESRGAN models for upscaling attached images.
+      - --hires-upscalers-dir
+      - /models/upscalers
       # Keep weights in system RAM and move them to the GPU only while
       # generating, so the GPU stays free for Ollama the rest of the time.
       - --offload-to-cpu

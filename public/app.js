@@ -10,7 +10,7 @@ const state = {
   models: [],         // [{ name, label?, capabilities: [] }] — image models have the 'image' capability
   settings: {
     model: '', systemPrompt: '', temperature: 0.7, showThinking: true,
-    imageSize: '1024x1024', freeVram: true,
+    imageSize: '1024x1024', upscaler: '4x-UltraMix_Balanced', freeVram: true,
   },
 };
 
@@ -53,7 +53,7 @@ const els = {
   fileInput: $('fileInput'), attachLabel: $('attachLabel'), attachments: $('attachments'),
   settingsBtn: $('settingsBtn'), settingsDialog: $('settingsDialog'),
   systemPrompt: $('systemPrompt'), temperature: $('temperature'), tempValue: $('tempValue'),
-  showThinking: $('showThinking'), imageSize: $('imageSize'), freeVram: $('freeVram'),
+  showThinking: $('showThinking'), imageSize: $('imageSize'), upscaler: $('upscaler'), freeVram: $('freeVram'),
   clearAll: $('clearAll'),
 };
 
@@ -421,7 +421,7 @@ async function streamReply(chat) {
 // ---------- Image generation (stable-diffusion.cpp) ----------
 
 async function generateImage(chat) {
-  const prompt = chat.messages.findLast(m => m.role === 'user')?.content || '';
+  const userMsg = chat.messages.findLast(m => m.role === 'user');
   const reply = { role: 'assistant', content: '', images: [] };
   chat.messages.push(reply);
   renderMessages();
@@ -442,7 +442,12 @@ async function generateImage(chat) {
       status.textContent = 'Unloading chat models…';
       await unloadOllamaModels();
     }
+    if (userMsg?.images?.length) {
+      await upscaleImages(userMsg.images, reply, status, signal);
+      return;
+    }
     status.textContent = 'Starting…';
+    const prompt = userMsg?.content || '';
     const [width, height] = state.settings.imageSize.split('x').map(Number);
     const job = await fetchJson('/sdcpp/v1/img_gen', {
       method: 'POST',
@@ -490,6 +495,83 @@ async function generateImage(chat) {
   }
 }
 
+// Attached images are upscaled with the server's ESRGAN model instead of
+// being used as a prompt. The endpoint is synchronous, so there is no job to poll.
+async function upscaleImages(images, reply, status, signal) {
+  // ESRGAN only sees RGB, so transparency is carried over in the browser.
+  const alphas = await Promise.all(images.map(extractAlpha));
+  const png = alphas.some(Boolean);
+  const notes = [];
+  for (const [i, image] of images.entries()) {
+    status.textContent = images.length > 1 ? `Upscaling image ${i + 1} of ${images.length}…` : 'Upscaling…';
+    const r = await fetchJson('/sdcpp/v1/upscale', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        image, upscaler: state.settings.upscaler,
+        output_format: png ? 'png' : 'jpeg', output_compression: png ? 100 : 95,
+      }),
+      signal,
+    });
+    const result = r.images[0].b64_json;
+    reply.images.push(alphas[i] ? await applyAlpha(result, alphas[i], r.width, r.height) : result);
+    notes.push(`${r.width} × ${r.height}`);
+  }
+  reply.imageFormat = png ? 'png' : 'jpeg';
+  reply.content = `Upscaled to ${notes.join(', ')}`;
+}
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Could not read image'));
+    img.src = src;
+  });
+}
+
+// Returns the image's alpha channel as a grayscale canvas, or null if it is fully opaque.
+async function extractAlpha(b64) {
+  const img = await loadImage(`data:image/*;base64,${b64}`);
+  const canvas = document.createElement('canvas');
+  canvas.width = img.naturalWidth;
+  canvas.height = img.naturalHeight;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0);
+  const data = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const px = data.data;
+  let transparent = false;
+  for (let i = 0; i < px.length; i += 4) {
+    if (px[i + 3] < 255) transparent = true;
+    px[i] = px[i + 1] = px[i + 2] = px[i + 3];
+    px[i + 3] = 255;
+  }
+  if (!transparent) return null;
+  ctx.putImageData(data, 0, 0);
+  return canvas;
+}
+
+// Scales the alpha mask to the upscaled size and applies it, returning base64 PNG.
+async function applyAlpha(b64, alpha, width, height) {
+  const img = await loadImage(`data:image/png;base64,${b64}`);
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0);
+  const mask = document.createElement('canvas');
+  mask.width = width;
+  mask.height = height;
+  const maskCtx = mask.getContext('2d');
+  maskCtx.imageSmoothingQuality = 'high';
+  maskCtx.drawImage(alpha, 0, 0, width, height);
+  const out = ctx.getImageData(0, 0, width, height);
+  const m = maskCtx.getImageData(0, 0, width, height).data;
+  for (let i = 3; i < out.data.length; i += 4) out.data[i] = m[i - 1];
+  ctx.putImageData(out, 0, 0);
+  return canvas.toDataURL('image/png').split(',')[1];
+}
+
 // Ollama keeps chat models in VRAM for a few minutes after use; evict them so
 // the image model has the GPU to itself.
 async function unloadOllamaModels() {
@@ -511,8 +593,12 @@ async function fetchJson(url, options) {
   let data = null;
   try { data = JSON.parse(text); } catch { /* not JSON */ }
   if (!res.ok) {
-    const message = data?.error?.message || data?.error || text;
-    throw new Error(message || `HTTP ${res.status}`);
+    // nginx answers 502/504 with an HTML page when the upstream is down or restarting.
+    const message = data?.error?.message || data?.error
+      || (res.status === 502 || res.status === 504
+        ? `Server unreachable (HTTP ${res.status}) — it may have crashed or still be starting`
+        : `HTTP ${res.status} ${res.statusText}`);
+    throw new Error(message);
   }
   return data;
 }
@@ -594,11 +680,12 @@ async function loadModels() {
 function updateComposerForModel() {
   // /api/tags only reports capabilities on newer Ollama; if absent, allow attaching.
   const info = modelInfo(state.settings.model);
-  const vision = !info?.capabilities.length || info.capabilities.includes('vision');
-  els.attachLabel.style.display = vision ? '' : 'none';
-  if (!vision) clearAttachments();
+  const canAttach = !info?.capabilities.length || info.capabilities.includes('vision')
+    || isImageModel(state.settings.model);
+  els.attachLabel.style.display = canAttach ? '' : 'none';
+  if (!canAttach) clearAttachments();
   els.input.placeholder = isImageModel(state.settings.model)
-    ? 'Describe an image to generate'
+    ? 'Describe an image to generate, or attach one to upscale'
     : 'Message Ollama';
 }
 
@@ -649,6 +736,7 @@ function openSettings() {
   els.tempValue.textContent = state.settings.temperature;
   els.showThinking.checked = state.settings.showThinking;
   els.imageSize.value = state.settings.imageSize;
+  els.upscaler.value = state.settings.upscaler;
   els.freeVram.checked = state.settings.freeVram;
   els.settingsDialog.showModal();
 }
@@ -662,6 +750,7 @@ els.settingsDialog.addEventListener('close', () => {
   state.settings.temperature = Number(els.temperature.value);
   state.settings.showThinking = els.showThinking.checked;
   state.settings.imageSize = els.imageSize.value;
+  state.settings.upscaler = els.upscaler.value;
   state.settings.freeVram = els.freeVram.checked;
   save();
   renderMessages();
