@@ -30,6 +30,15 @@ server {
         proxy_send_timeout 600s;
     }
 
+    # Second stable-diffusion.cpp server for image editing; the prefix is
+    # stripped so it sees the same /sdcpp/v1/... paths.
+    location /sdcpp-edit/ {
+        proxy_pass ${SD_EDIT_URL}/;
+        proxy_http_version 1.1;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+    }
+
     location / {
         try_files $uri $uri/ /index.html;
     }

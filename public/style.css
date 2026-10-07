@@ -280,6 +280,14 @@ dialog::backdrop { background: rgba(0, 0, 0, .6); }
   animation: spin .8s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+.custom-size { display: flex; align-items: flex-end; gap: 8px; }
+.custom-size[hidden] { display: none; }
+.custom-size label { flex: 1; }
+.custom-size span { padding-bottom: 9px; }
+.settings input[type="number"] {
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px; width: 100%;
+}
 .settings select {
   background: var(--bg); border: 1px solid var(--border);
   border-radius: 8px; padding: 8px;

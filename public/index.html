@@ -70,8 +70,14 @@
           <option value="1216x832">Landscape (1216 × 832)</option>
           <option value="832x1216">Portrait (832 × 1216)</option>
           <option value="512x512">Small (512 × 512)</option>
+          <option value="custom">Custom…</option>
         </select>
       </label>
+      <div class="custom-size" id="customSize" hidden>
+        <label>Width <input type="number" id="customWidth" min="64" max="4096" step="16"></label>
+        <span>×</span>
+        <label>Height <input type="number" id="customHeight" min="64" max="4096" step="16"></label>
+      </div>
       <label>Upscaler (attach an image to the image model)
         <select id="upscaler">
           <option value="RealESRGAN_x4plus">Soft — RealESRGAN x4plus</option>

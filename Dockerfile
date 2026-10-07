@@ -13,6 +13,7 @@ COPY nginx.conf.template /etc/nginx/templates/default.conf.template
 
 ENV OLLAMA_URL=http://127.0.0.1:11434 \
     SD_URL=http://127.0.0.1:7861 \
+    SD_EDIT_URL=http://127.0.0.1:7862 \
     LISTEN_PORT=3000
 
 EXPOSE 3000

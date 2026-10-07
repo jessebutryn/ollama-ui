@@ -9,6 +9,7 @@ services:
     environment:
       OLLAMA_URL: http://127.0.0.1:11434
       SD_URL: http://127.0.0.1:7861
+      SD_EDIT_URL: http://127.0.0.1:7862
       LISTEN_PORT: 3000
 
   # One-shot job: downloads the image model weights into the `image-models`
@@ -65,6 +66,49 @@ services:
       - /models/upscalers
       # Keep weights in system RAM and move them to the GPU only while
       # generating, so the GPU stays free for Ollama the rest of the time.
+      - --offload-to-cpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Second stable-diffusion.cpp server running FLUX.2 klein 9B, which edits an
+  # attached image from a text instruction. Same image as image-server.
+  edit-server:
+    image: sd-server-cuda:3f8527a
+    container_name: edit-server
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      image-models:
+        condition: service_completed_successfully
+      image-server:
+        condition: service_started
+    volumes:
+      - image-models:/models:ro
+    entrypoint: ["/sd-server"]
+    command:
+      - --listen-ip
+      - "127.0.0.1"
+      - --listen-port
+      - "7862"
+      - --diffusion-model
+      - /models/flux-2-klein-9b-Q8_0.gguf
+      - --llm
+      - /models/Qwen3-8B-Q6_K.gguf
+      - --vae
+      - /models/flux2-vae.safetensors
+      # Klein is distilled: 4 euler steps with no CFG.
+      - --steps
+      - "4"
+      - --cfg-scale
+      - "1.0"
+      - --sampling-method
+      - euler
+      - --diffusion-fa
       - --offload-to-cpu
     deploy:
       resources:

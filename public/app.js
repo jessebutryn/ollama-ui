@@ -7,7 +7,8 @@ const STORAGE_KEY = 'ollama-ui:v1';
 const state = {
   chats: [],          // [{ id, title, model, messages: [{ role, content, thinking?, images?, imageFormat? }] }]
   currentId: null,
-  models: [],         // [{ name, label?, capabilities: [] }] — image models have the 'image' capability
+  models: [],         // [{ name, label?, capabilities: [], server? }] — image models have the 'image'
+                      // capability (plus 'edit' for the edit server) and the URL prefix of their sd-server
   settings: {
     model: '', systemPrompt: '', temperature: 0.7, showThinking: true,
     imageSize: '1024x1024', upscaler: '4x-UltraMix_Balanced', freeVram: true,
@@ -42,6 +43,7 @@ const currentChat = () => state.chats.find(c => c.id === state.currentId) || nul
 const modelInfo = name => state.models.find(m => m.name === name);
 const hasCapability = (name, cap) => (modelInfo(name)?.capabilities || []).includes(cap);
 const isImageModel = name => hasCapability(name, 'image');
+const isEditModel = name => hasCapability(name, 'edit');
 
 // ---------- DOM ----------
 
@@ -53,7 +55,8 @@ const els = {
   fileInput: $('fileInput'), attachLabel: $('attachLabel'), attachments: $('attachments'),
   settingsBtn: $('settingsBtn'), settingsDialog: $('settingsDialog'),
   systemPrompt: $('systemPrompt'), temperature: $('temperature'), tempValue: $('tempValue'),
-  showThinking: $('showThinking'), imageSize: $('imageSize'), upscaler: $('upscaler'), freeVram: $('freeVram'),
+  showThinking: $('showThinking'), imageSize: $('imageSize'), customSize: $('customSize'),
+  customWidth: $('customWidth'), customHeight: $('customHeight'), upscaler: $('upscaler'), freeVram: $('freeVram'),
   clearAll: $('clearAll'),
 };
 
@@ -422,6 +425,8 @@ async function streamReply(chat) {
 
 async function generateImage(chat) {
   const userMsg = chat.messages.findLast(m => m.role === 'user');
+  const server = modelInfo(chat.model)?.server || '/sdcpp';
+  const editing = isEditModel(chat.model) && userMsg?.images?.length;
   const reply = { role: 'assistant', content: '', images: [] };
   chat.messages.push(reply);
   renderMessages();
@@ -442,26 +447,31 @@ async function generateImage(chat) {
       status.textContent = 'Unloading chat models…';
       await unloadOllamaModels();
     }
-    if (userMsg?.images?.length) {
+    if (userMsg?.images?.length && !editing) {
       await upscaleImages(userMsg.images, reply, status, signal);
       return;
     }
     status.textContent = 'Starting…';
     const prompt = userMsg?.content || '';
-    const [width, height] = state.settings.imageSize.split('x').map(Number);
-    const job = await fetchJson('/sdcpp/v1/img_gen', {
+    const [width, height] = editing
+      ? await editSize(userMsg.images[0])
+      : state.settings.imageSize.split('x').map(Number);
+    const job = await fetchJson(`${server}/v1/img_gen`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       // Steps, CFG and sampler come from the server's defaults for the loaded model.
       body: JSON.stringify({
         prompt, width, height, seed: -1, output_format: 'jpeg', output_compression: 92,
+        ...(editing && { ref_images: userMsg.images }),
+        // Decoding very large images in one pass can run out of VRAM.
+        ...(width * height > 1536 * 1536 && { vae_tiling_params: { enabled: true } }),
       }),
       signal,
     });
     jobId = job.id;
 
     while (true) {
-      const s = await fetchJson(`/sdcpp/v1/jobs/${jobId}`, { signal });
+      const s = await fetchJson(`${server}/v1/jobs/${jobId}`, { signal });
       if (s.status === 'completed') {
         reply.images = s.result.images.map(img => img.b64_json);
         reply.imageFormat = s.result.output_format;
@@ -473,13 +483,13 @@ async function generateImage(chat) {
       const secs = Math.round((Date.now() - started) / 1000);
       status.textContent = s.status === 'queued'
         ? `Queued (position ${s.queue_position})…`
-        : `Generating image… ${secs}s`;
+        : `${editing ? 'Editing' : 'Generating'} image… ${secs}s`;
       await sleep(1000, signal);
     }
   } catch (err) {
     if (err.name === 'AbortError') {
       // The server can only cancel queued jobs; a running one finishes and is discarded.
-      if (jobId) fetch(`/sdcpp/v1/jobs/${jobId}/cancel`, { method: 'POST' }).catch(() => {});
+      if (jobId) fetch(`${server}/v1/jobs/${jobId}/cancel`, { method: 'POST' }).catch(() => {});
     } else {
       reply.error = err.message;
     }
@@ -519,6 +529,15 @@ async function upscaleImages(images, reply, status, signal) {
   }
   reply.imageFormat = png ? 'png' : 'jpeg';
   reply.content = `Upscaled to ${notes.join(', ')}`;
+}
+
+// Edits come out at the reference image's aspect ratio, at about one megapixel
+// (what the model is trained for), in multiples of 16.
+async function editSize(b64) {
+  const img = await loadImage(`data:image/*;base64,${b64}`);
+  const scale = Math.sqrt((1024 * 1024) / (img.naturalWidth * img.naturalHeight));
+  const round16 = n => Math.max(256, Math.round((n * scale) / 16) * 16);
+  return [round16(img.naturalWidth), round16(img.naturalHeight)];
 }
 
 function loadImage(src) {
@@ -642,16 +661,25 @@ async function loadChatModels() {
   }
 }
 
-// The image server loads a single model at startup; offer it if it's up.
-async function loadImageModels() {
+// Each sd-server loads a single model at startup; offer it if it's up.
+async function loadSdModel(server, capabilities, suffix) {
   try {
-    const caps = await fetchJson('/sdcpp/v1/capabilities');
+    const caps = await fetchJson(`${server}/v1/capabilities`);
     if (!caps.supported_modes?.includes('img_gen')) return [];
-    return [{ name: `image:${caps.model.stem}`, label: caps.model.stem, capabilities: ['image'] }];
+    const { stem } = caps.model;
+    return [{ name: `image:${stem}`, label: `${stem}${suffix}`, capabilities, server }];
   } catch (err) {
-    console.info('Image server unavailable:', err.message);
+    console.info(`Image server at ${server} unavailable:`, err.message);
     return [];
   }
+}
+
+async function loadImageModels() {
+  const servers = await Promise.all([
+    loadSdModel('/sdcpp', ['image'], ''),
+    loadSdModel('/sdcpp-edit/sdcpp', ['image', 'edit'], ' (edit)'),
+  ]);
+  return servers.flat();
 }
 
 async function loadModels() {
@@ -684,9 +712,11 @@ function updateComposerForModel() {
     || isImageModel(state.settings.model);
   els.attachLabel.style.display = canAttach ? '' : 'none';
   if (!canAttach) clearAttachments();
-  els.input.placeholder = isImageModel(state.settings.model)
-    ? 'Describe an image to generate, or attach one to upscale'
-    : 'Message Ollama';
+  els.input.placeholder = isEditModel(state.settings.model)
+    ? 'Describe an image to generate, or attach one and say how to change it'
+    : isImageModel(state.settings.model)
+      ? 'Describe an image to generate, or attach one to upscale'
+      : 'Message Ollama';
 }
 
 // ---------- Attachments ----------
@@ -735,10 +765,26 @@ function openSettings() {
   els.temperature.value = state.settings.temperature;
   els.tempValue.textContent = state.settings.temperature;
   els.showThinking.checked = state.settings.showThinking;
-  els.imageSize.value = state.settings.imageSize;
+  // Sizes not in the preset list are custom.
+  const [width, height] = state.settings.imageSize.split('x');
+  const preset = [...els.imageSize.options].some(o => o.value === state.settings.imageSize);
+  els.imageSize.value = preset ? state.settings.imageSize : 'custom';
+  els.customWidth.value = width;
+  els.customHeight.value = height;
+  els.customSize.hidden = preset;
   els.upscaler.value = state.settings.upscaler;
   els.freeVram.checked = state.settings.freeVram;
   els.settingsDialog.showModal();
+}
+
+els.imageSize.addEventListener('change', () => {
+  els.customSize.hidden = els.imageSize.value !== 'custom';
+});
+
+// The server accepts 64–4096 px; dimensions must be multiples of 16.
+function customDimension(input) {
+  const n = Math.round(Number(input.value) / 16) * 16;
+  return Math.min(4096, Math.max(64, n || 1024));
 }
 
 els.temperature.addEventListener('input', () => {
@@ -749,7 +795,9 @@ els.settingsDialog.addEventListener('close', () => {
   state.settings.systemPrompt = els.systemPrompt.value;
   state.settings.temperature = Number(els.temperature.value);
   state.settings.showThinking = els.showThinking.checked;
-  state.settings.imageSize = els.imageSize.value;
+  state.settings.imageSize = els.imageSize.value === 'custom'
+    ? `${customDimension(els.customWidth)}x${customDimension(els.customHeight)}`
+    : els.imageSize.value;
   state.settings.upscaler = els.upscaler.value;
   state.settings.freeVram = els.freeVram.checked;
   save();

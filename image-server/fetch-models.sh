@@ -1,6 +1,6 @@
 #!/bin/sh
-# Downloads the Z-Image-Turbo weights (~10 GB) and the ESRGAN upscaler used by
-# the image server.
+# Downloads the weights for the image server (Z-Image-Turbo, ~10 GB, plus the
+# ESRGAN upscalers) and the edit server (FLUX.2 klein 9B, ~17 GB).
 # Files already present are skipped; interrupted downloads resume.
 set -eu
 
@@ -29,5 +29,10 @@ mkdir -p /models/upscalers
 fetch "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth" upscalers/RealESRGAN_x4plus.pth
 fetch "$HF/Kim2091/UltraSharp/resolve/main/Interpolations/4x-UltraMix_Balanced.pth" upscalers/4x-UltraMix_Balanced.pth
 fetch "$HF/Kim2091/UltraSharp/resolve/main/4x-UltraSharp.safetensors" upscalers/4x-UltraSharp.safetensors
+
+# FLUX.2 klein 9B for instruction-based editing (non-commercial license).
+fetch "$HF/leejet/FLUX.2-klein-9B-GGUF/resolve/main/flux-2-klein-9b-Q8_0.gguf" flux-2-klein-9b-Q8_0.gguf
+fetch "$HF/unsloth/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q6_K.gguf" Qwen3-8B-Q6_K.gguf
+fetch "$HF/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors" flux2-vae.safetensors
 
 echo "All image models present."
