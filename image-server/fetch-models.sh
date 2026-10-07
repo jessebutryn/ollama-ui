@@ -26,6 +26,9 @@ fetch "$HF/Comfy-Org/z_image_turbo/resolve/main/split_files/vae/ae.safetensors" 
 # server scans this directory. The Kim2091 models are CC-BY-NC-SA 4.0
 # (non-commercial use only).
 mkdir -p /models/upscalers
+# RealESRNet is the same network trained without the GAN loss: it cleans and
+# enlarges without inventing texture, so faces and text stay faithful.
+fetch "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.1/RealESRNet_x4plus.pth" upscalers/RealESRNet_x4plus.pth
 fetch "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth" upscalers/RealESRGAN_x4plus.pth
 fetch "$HF/Kim2091/UltraSharp/resolve/main/Interpolations/4x-UltraMix_Balanced.pth" upscalers/4x-UltraMix_Balanced.pth
 fetch "$HF/Kim2091/UltraSharp/resolve/main/4x-UltraSharp.safetensors" upscalers/4x-UltraSharp.safetensors

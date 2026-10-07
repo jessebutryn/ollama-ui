@@ -20,7 +20,7 @@ Pick the model under **Image** in the model picker and describe the picture you 
 
 ### Upscaling
 
-Attach an image to the Z-Image model (no prompt needed) to upscale it 4× with an ESRGAN model. Pick Soft, Balanced or Sharp under **Upscaler** in Settings. Transparency is preserved.
+Attach an image to the Z-Image model (no prompt needed) to upscale it 4× with an ESRGAN model. Pick the model under **Upscaler** in Settings: Faithful (the default) enlarges and cleans up without inventing detail, so faces and text stay intact, while Soft, Balanced and Sharp add progressively more GAN-generated texture. **Auto color-correct** stretches each color channel's levels before upscaling, which fixes washed-out contrast and color casts. Transparency is preserved.
 
 ### Editing
 

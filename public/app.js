@@ -11,7 +11,8 @@ const state = {
                       // capability (plus 'edit' for the edit server) and the URL prefix of their sd-server
   settings: {
     model: '', systemPrompt: '', temperature: 0.7, showThinking: true,
-    imageSize: '1024x1024', upscaler: '4x-UltraMix_Balanced', freeVram: true,
+    imageSize: '1024x1024', upscaler: 'RealESRNet_x4plus', colorCorrect: true,
+    freeVram: true,
   },
 };
 
@@ -56,7 +57,7 @@ const els = {
   settingsBtn: $('settingsBtn'), settingsDialog: $('settingsDialog'),
   systemPrompt: $('systemPrompt'), temperature: $('temperature'), tempValue: $('tempValue'),
   showThinking: $('showThinking'), imageSize: $('imageSize'), customSize: $('customSize'),
-  customWidth: $('customWidth'), customHeight: $('customHeight'), upscaler: $('upscaler'), freeVram: $('freeVram'),
+  customWidth: $('customWidth'), customHeight: $('customHeight'), upscaler: $('upscaler'), colorCorrect: $('colorCorrect'), freeVram: $('freeVram'),
   clearAll: $('clearAll'),
 };
 
@@ -513,12 +514,18 @@ async function upscaleImages(images, reply, status, signal) {
   const png = alphas.some(Boolean);
   const notes = [];
   for (const [i, image] of images.entries()) {
-    status.textContent = images.length > 1 ? `Upscaling image ${i + 1} of ${images.length}…` : 'Upscaling…';
+    const of = images.length > 1 ? ` image ${i + 1} of ${images.length}` : '';
+    let source = image;
+    if (state.settings.colorCorrect) {
+      status.textContent = `Color correcting${of}…`;
+      source = await autoColor(image);
+    }
+    status.textContent = `Upscaling${of}…`;
     const r = await fetchJson('/sdcpp/v1/upscale', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        image, upscaler: state.settings.upscaler,
+        image: source, upscaler: state.settings.upscaler,
         output_format: png ? 'png' : 'jpeg', output_compression: png ? 100 : 95,
       }),
       signal,
@@ -529,6 +536,58 @@ async function upscaleImages(images, reply, status, signal) {
   }
   reply.imageFormat = png ? 'png' : 'jpeg';
   reply.content = `Upscaled to ${notes.join(', ')}`;
+}
+
+// Deterministic auto levels: stretches each channel so its darkest and
+// brightest 0.5% of pixels reach black and white, which also removes color
+// casts. Gain is capped so images with a genuinely dominant color (a sunset,
+// a blue room) aren't pushed too far. Returns base64 PNG.
+async function autoColor(b64) {
+  const img = await loadImage(`data:image/*;base64,${b64}`);
+  const canvas = document.createElement('canvas');
+  canvas.width = img.naturalWidth;
+  canvas.height = img.naturalHeight;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0);
+  const data = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const px = data.data;
+
+  const hist = [0, 1, 2].map(() => new Uint32Array(256));
+  let count = 0;
+  for (let i = 0; i < px.length; i += 4) {
+    if (px[i + 3] === 0) continue;
+    hist[0][px[i]]++;
+    hist[1][px[i + 1]]++;
+    hist[2][px[i + 2]]++;
+    count++;
+  }
+  if (!count) return b64;
+
+  const clip = count * 0.005;
+  const luts = hist.map(h => {
+    let lo = 0;
+    for (let sum = 0; lo < 255 && (sum += h[lo]) <= clip; lo++);
+    let hi = 255;
+    for (let sum = 0; hi > 0 && (sum += h[hi]) <= clip; hi--);
+    const lut = new Uint8ClampedArray(256);
+    if (hi - lo < 32) {
+      for (let v = 0; v < 256; v++) lut[v] = v;  // flat channel: leave it alone
+      return lut;
+    }
+    const gain = Math.min(255 / (hi - lo), 1.5);
+    // Centers the stretched range; without the cap this maps lo→0 and hi→255.
+    const offset = (255 - gain * (hi + lo)) / 2;
+    for (let v = 0; v < 256; v++) lut[v] = v * gain + offset;
+    return lut;
+  });
+
+  for (let i = 0; i < px.length; i += 4) {
+    px[i] = luts[0][px[i]];
+    px[i + 1] = luts[1][px[i + 1]];
+    px[i + 2] = luts[2][px[i + 2]];
+  }
+  ctx.putImageData(data, 0, 0);
+  return canvas.toDataURL('image/png').split(',')[1];
 }
 
 // Edits come out at the reference image's aspect ratio, at about one megapixel
@@ -773,6 +832,7 @@ function openSettings() {
   els.customHeight.value = height;
   els.customSize.hidden = preset;
   els.upscaler.value = state.settings.upscaler;
+  els.colorCorrect.checked = state.settings.colorCorrect;
   els.freeVram.checked = state.settings.freeVram;
   els.settingsDialog.showModal();
 }
@@ -799,6 +859,7 @@ els.settingsDialog.addEventListener('close', () => {
     ? `${customDimension(els.customWidth)}x${customDimension(els.customHeight)}`
     : els.imageSize.value;
   state.settings.upscaler = els.upscaler.value;
+  state.settings.colorCorrect = els.colorCorrect.checked;
   state.settings.freeVram = els.freeVram.checked;
   save();
   renderMessages();

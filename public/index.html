@@ -80,10 +80,14 @@
       </div>
       <label>Upscaler (attach an image to the image model)
         <select id="upscaler">
+          <option value="RealESRNet_x4plus">Faithful — RealESRNet x4plus (no invented detail)</option>
           <option value="RealESRGAN_x4plus">Soft — RealESRGAN x4plus</option>
           <option value="4x-UltraMix_Balanced">Balanced — UltraMix Balanced</option>
           <option value="4x-UltraSharp">Sharp — UltraSharp</option>
         </select>
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" id="colorCorrect"> Auto color-correct images before upscaling
       </label>
       <label class="checkbox">
         <input type="checkbox" id="freeVram"> Unload chat models before generating images (frees GPU memory)
