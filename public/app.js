@@ -520,6 +520,8 @@ async function upscaleImages(images, reply, status, signal) {
       status.textContent = `Color correcting${of}…`;
       source = await autoColor(image);
     }
+    const fit = await fitForUpscale(source);
+    source = fit.b64;
     status.textContent = `Upscaling${of}…`;
     const r = await fetchJson('/sdcpp/v1/upscale', {
       method: 'POST',
@@ -532,10 +534,27 @@ async function upscaleImages(images, reply, status, signal) {
     });
     const result = r.images[0].b64_json;
     reply.images.push(alphas[i] ? await applyAlpha(result, alphas[i], r.width, r.height) : result);
-    notes.push(`${r.width} × ${r.height}`);
+    notes.push(`${r.width} × ${r.height}`
+      + (fit.from ? ` (shrunk from ${fit.from} first to stay within the server's 8192 px limit)` : ''));
   }
   reply.imageFormat = png ? 'png' : 'jpeg';
   reply.content = `Upscaled to ${notes.join(', ')}`;
+}
+
+// The models upscale 4× and the server rejects output over 8192 px on either
+// side, so larger inputs are scaled down to fit first. Returns { b64, from? }.
+async function fitForUpscale(b64, maxSide = 8192 / 4) {
+  const img = await loadImage(`data:image/*;base64,${b64}`);
+  const { naturalWidth: w, naturalHeight: h } = img;
+  const scale = maxSide / Math.max(w, h);
+  if (scale >= 1) return { b64 };
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(w * scale);
+  canvas.height = Math.round(h * scale);
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  return { b64: canvas.toDataURL('image/png').split(',')[1], from: `${w} × ${h}` };
 }
 
 // Deterministic auto levels: stretches each channel so its darkest and
