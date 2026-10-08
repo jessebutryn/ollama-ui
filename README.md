@@ -12,7 +12,7 @@ Then open http://localhost:3000.
 
 The container uses host networking and proxies `/api/*` to Ollama at `http://127.0.0.1:11434`, so Ollama needs no extra configuration.
 
-The first `up` takes a while: it compiles stable-diffusion.cpp with CUDA (~15–30 min) and downloads ~55 GB of model weights (~27 GB image, ~28 GB video) into the `image-models` Docker volume. The video download runs separately, so image generation is available before it finishes. Later starts reuse both.
+The first `up` takes a while: it compiles stable-diffusion.cpp with CUDA (~15–30 min) and downloads ~27 GB of image model weights into the `image-models` Docker volume (~28 GB more with video enabled; see below). The video download runs separately, so image generation is available before it finishes. Later starts reuse both.
 
 ## Image generation
 
@@ -52,7 +52,7 @@ The CUDA kernels are compiled for RTX 30-series cards (`sm_86`). For another GPU
 
 The image, edit and video models are kept in system RAM (about 55 GB between them) and only moved onto the GPU while generating (`--offload-to-cpu`). Before each image or video, the UI asks Ollama to unload any chat models so the two don't compete for VRAM; the next chat message reloads the chat model. You can turn this off in Settings if your GPU has room for both.
 
-To run without image generation, start only the UI: `docker compose up -d --build ollama-ui`. To run without video, leave out `video-models` and `video-server`: `docker compose up -d ollama-ui image-server edit-server`.
+To run without image generation, start only the UI: `docker compose up -d --build ollama-ui`. Video is off by default because it needs about 26 GB more system RAM than the rest (roughly 64 GB in total with Ollama). To turn it on, put `COMPOSE_PROFILES=video` in a `.env` file next to `docker-compose.yml`, or run `docker compose --profile video up -d`.
 
 ## Configuration
 

@@ -119,9 +119,14 @@ services:
               count: all
               capabilities: [gpu]
 
+  # Video is opt-in: its weights take ~26 GB of system RAM on top of the image
+  # and edit servers' ~27 GB, more than a 32 GB machine has. Enable it with
+  # COMPOSE_PROFILES=video (e.g. in .env) on hosts with the memory for it.
+
   # Downloads the video model weights (~28 GB) separately, so the image servers
   # don't wait on them.
   video-models:
+    profiles: [video]
     image: curlimages/curl:8.10.1
     user: root
     volumes:
@@ -132,6 +137,7 @@ services:
   # Third stable-diffusion.cpp server running LTX-2.3 22B, which generates video
   # with audio from text or from an attached first frame. Same image as image-server.
   video-server:
+    profiles: [video]
     image: sd-server-cuda:3f8527a
     container_name: video-server
     restart: unless-stopped
