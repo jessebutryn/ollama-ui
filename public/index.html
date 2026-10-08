@@ -89,8 +89,24 @@
       <label class="checkbox">
         <input type="checkbox" id="colorCorrect"> Auto color-correct images before upscaling
       </label>
+      <label>Video size (attached first frames keep their aspect ratio)
+        <select id="videoSize">
+          <option value="1280x720">Landscape (1280 × 720)</option>
+          <option value="720x1280">Portrait (720 × 1280)</option>
+          <option value="960x960">Square (960 × 960)</option>
+          <option value="640x352">Draft (640 × 352, much faster)</option>
+        </select>
+      </label>
+      <label>Video length (24 fps)
+        <select id="videoFrames">
+          <option value="49">2 seconds</option>
+          <option value="97">4 seconds</option>
+          <option value="121">5 seconds</option>
+          <option value="241">10 seconds</option>
+        </select>
+      </label>
       <label class="checkbox">
-        <input type="checkbox" id="freeVram"> Unload chat models before generating images (frees GPU memory)
+        <input type="checkbox" id="freeVram"> Unload chat models before generating images or video (frees GPU memory)
       </label>
       <div class="dialog-actions">
         <button value="clear" class="danger" id="clearAll" type="button">Delete all chats</button>

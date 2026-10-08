@@ -1,6 +1,6 @@
 # Ollama UI
 
-A lightweight ChatGPT-style web interface for a local [Ollama](https://ollama.com) server, served by nginx in a Docker container. Image generation and upscaling run alongside it in a [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) container using Z-Image-Turbo, and image editing in a second one using FLUX.2 klein 9B.
+A lightweight ChatGPT-style web interface for a local [Ollama](https://ollama.com) server, served by nginx in a Docker container. Image generation and upscaling run alongside it in a [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) container using Z-Image-Turbo, image editing in a second one using FLUX.2 klein 9B, and video generation (with audio) in a third using LTX-2.3 22B.
 
 ## Run
 
@@ -12,7 +12,7 @@ Then open http://localhost:3000.
 
 The container uses host networking and proxies `/api/*` to Ollama at `http://127.0.0.1:11434`, so Ollama needs no extra configuration.
 
-The first `up` takes a while: it compiles stable-diffusion.cpp with CUDA (~15–30 min) and downloads ~27 GB of image model weights into the `image-models` Docker volume. Later starts reuse both.
+The first `up` takes a while: it compiles stable-diffusion.cpp with CUDA (~15–30 min) and downloads ~55 GB of model weights (~27 GB image, ~28 GB video) into the `image-models` Docker volume. The video download runs separately, so image generation is available before it finishes. Later starts reuse both.
 
 ## Image generation
 
@@ -26,7 +26,12 @@ Attach an image to the Z-Image model (no prompt needed) to upscale it 4× with a
 
 Pick the model marked **(edit)**, attach an image and describe the change, e.g. "make it night time" or "remove the person on the left". The `edit-server` service runs FLUX.2 klein 9B (Q8_0, 4 steps) and returns the result at the input's aspect ratio, about one megapixel. Without an attachment it generates from text like the Z-Image model. FLUX.2 klein 9B is under a non-commercial license.
 
-### Requirements
+## Video generation
+
+Pick the model under **Video** and describe the clip, including any sound you want (dialogue, music, ambience): LTX-2.3 generates a matching audio track. Attach an image to use it as the first frame (image-to-video); the video keeps its aspect ratio. Size and length are in Settings (default 1280 × 720, 5 seconds at 24 fps). The `video-server` service runs LTX-2.3 22B dev (UD-Q4_K_M) with Gemma 3 12B as its text encoder.
+
+Expect generation to take minutes, not seconds; the Draft size is much faster for trying prompts. Videos are WebM (VP8 with PCM audio) and are stored in the browser's IndexedDB rather than localStorage, since each is several MB.
+
 
 The image server needs GPU access from Docker, which requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). On Ubuntu / Linux Mint:
 
@@ -45,9 +50,9 @@ The CUDA kernels are compiled for RTX 30-series cards (`sm_86`). For another GPU
 
 ### GPU memory
 
-The image and edit models are kept in system RAM (about 27 GB between them) and only moved onto the GPU while generating (`--offload-to-cpu`). Before each image, the UI asks Ollama to unload any chat models so the two don't compete for VRAM; the next chat message reloads the chat model. You can turn this off in Settings if your GPU has room for both.
+The image, edit and video models are kept in system RAM (about 55 GB between them) and only moved onto the GPU while generating (`--offload-to-cpu`). Before each image or video, the UI asks Ollama to unload any chat models so the two don't compete for VRAM; the next chat message reloads the chat model. You can turn this off in Settings if your GPU has room for both.
 
-To run without image generation, start only the UI: `docker compose up -d --build ollama-ui`.
+To run without image generation, start only the UI: `docker compose up -d --build ollama-ui`. To run without video, leave out `video-models` and `video-server`: `docker compose up -d ollama-ui image-server edit-server`.
 
 ## Configuration
 
@@ -58,6 +63,7 @@ Environment variables (set in `docker-compose.yml`):
 | `OLLAMA_URL`  | `http://127.0.0.1:11434` | Where the Ollama API lives   |
 | `SD_URL`      | `http://127.0.0.1:7861`  | Where the image server lives |
 | `SD_EDIT_URL` | `http://127.0.0.1:7862`  | Where the edit server lives  |
+| `SD_VIDEO_URL`| `http://127.0.0.1:7863`  | Where the video server lives |
 | `LISTEN_PORT` | `3000`                   | Port the UI is served on     |
 
 ### Without host networking (e.g. Docker Desktop on macOS/Windows)
@@ -84,5 +90,6 @@ On Linux this also requires Ollama to listen on more than loopback (`OLLAMA_HOST
 - Collapsible "thinking" output for reasoning models (e.g. qwen3, gemma4)
 - Image attachments (upload or paste) for vision models
 - Image generation with Z-Image-Turbo (stable-diffusion.cpp)
+- Video generation with audio using LTX-2.3
 - System prompt and temperature settings
 - Regenerate last reply

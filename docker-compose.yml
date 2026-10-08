@@ -10,6 +10,7 @@ services:
       OLLAMA_URL: http://127.0.0.1:11434
       SD_URL: http://127.0.0.1:7861
       SD_EDIT_URL: http://127.0.0.1:7862
+      SD_VIDEO_URL: http://127.0.0.1:7863
       LISTEN_PORT: 3000
 
   # One-shot job: downloads the image model weights into the `image-models`
@@ -108,6 +109,68 @@ services:
       - "1.0"
       - --sampling-method
       - euler
+      - --diffusion-fa
+      - --offload-to-cpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Downloads the video model weights (~28 GB) separately, so the image servers
+  # don't wait on them.
+  video-models:
+    image: curlimages/curl:8.10.1
+    user: root
+    volumes:
+      - image-models:/models
+      - ./image-server/fetch-models.sh:/fetch-models.sh:ro
+    entrypoint: ["/bin/sh", "/fetch-models.sh", "video"]
+
+  # Third stable-diffusion.cpp server running LTX-2.3 22B, which generates video
+  # with audio from text or from an attached first frame. Same image as image-server.
+  video-server:
+    image: sd-server-cuda:3f8527a
+    container_name: video-server
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      video-models:
+        condition: service_completed_successfully
+      image-server:
+        condition: service_started
+    volumes:
+      - image-models:/models:ro
+    entrypoint: ["/sd-server"]
+    command:
+      - --listen-ip
+      - "127.0.0.1"
+      - --listen-port
+      - "7863"
+      - --diffusion-model
+      - /models/ltx/ltx-2.3-22b-dev-UD-Q4_K_M.gguf
+      - --vae
+      - /models/ltx/ltx-2.3-22b-dev_video_vae.safetensors
+      - --audio-vae
+      - /models/ltx/ltx-2.3-22b-dev_audio_vae.safetensors
+      - --llm
+      - /models/ltx/gemma-3-12b-it-qat-UD-Q4_K_XL.gguf
+      - --embeddings-connectors
+      - /models/ltx/ltx-2.3-22b-dev_embeddings_connectors.safetensors
+      - --cfg-scale
+      - "6.0"
+      - --sampling-method
+      - euler
+      - --width
+      - "1280"
+      - --height
+      - "720"
+      - --video-frames
+      - "121"
+      - --fps
+      - "24"
       - --diffusion-fa
       - --offload-to-cpu
     deploy:

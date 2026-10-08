@@ -5,7 +5,8 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
-    client_max_body_size 50m;
+    # Images travel as base64 JSON; a large PNG for upscaling or editing can exceed 50 MB.
+    client_max_body_size 200m;
 
     location /api/ {
         proxy_pass ${OLLAMA_URL};
@@ -34,6 +35,14 @@ server {
     # stripped so it sees the same /sdcpp/v1/... paths.
     location /sdcpp-edit/ {
         proxy_pass ${SD_EDIT_URL}/;
+        proxy_http_version 1.1;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+    }
+
+    # Third stable-diffusion.cpp server for video generation, prefix stripped likewise.
+    location /sdcpp-video/ {
+        proxy_pass ${SD_VIDEO_URL}/;
         proxy_http_version 1.1;
         proxy_read_timeout 600s;
         proxy_send_timeout 600s;

@@ -5,14 +5,15 @@
 const STORAGE_KEY = 'ollama-ui:v1';
 
 const state = {
-  chats: [],          // [{ id, title, model, messages: [{ role, content, thinking?, images?, imageFormat? }] }]
+  chats: [],          // [{ id, title, model, messages: [{ role, content, thinking?, images?, imageFormat?, video? }] }]
   currentId: null,
   models: [],         // [{ name, label?, capabilities: [], server? }] — image models have the 'image'
-                      // capability (plus 'edit' for the edit server) and the URL prefix of their sd-server
+                      // capability (plus 'edit' for the edit server), video models 'video', and both
+                      // carry the URL prefix of their sd-server
   settings: {
     model: '', systemPrompt: '', temperature: 0.7, showThinking: true,
     imageSize: '1024x1024', upscaler: 'RealESRNet_x4plus', colorCorrect: true,
-    freeVram: true,
+    freeVram: true, videoSize: '1280x720', videoFrames: 121,
   },
 };
 
@@ -45,6 +46,52 @@ const modelInfo = name => state.models.find(m => m.name === name);
 const hasCapability = (name, cap) => (modelInfo(name)?.capabilities || []).includes(cap);
 const isImageModel = name => hasCapability(name, 'image');
 const isEditModel = name => hasCapability(name, 'edit');
+const isVideoModel = name => hasCapability(name, 'video');
+
+// ---------- Media store ----------
+
+// Videos are several MB each, far too big for localStorage, so they live in
+// IndexedDB as Blobs and messages keep only { id, mimeType }.
+const mediaDb = new Promise((resolve, reject) => {
+  const req = indexedDB.open('ollama-ui-media', 1);
+  req.onupgradeneeded = () => req.result.createObjectStore('media');
+  req.onsuccess = () => resolve(req.result);
+  req.onerror = () => reject(req.error);
+});
+mediaDb.catch(err => console.warn('Browser storage for videos is unavailable:', err));
+
+async function mediaRequest(mode, fn) {
+  const db = await mediaDb;
+  return new Promise((resolve, reject) => {
+    const req = fn(db.transaction('media', mode).objectStore('media'));
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+const putMedia = (id, blob) => mediaRequest('readwrite', store => store.put(blob, id));
+const deleteMedia = id => mediaRequest('readwrite', store => store.delete(id));
+
+// Messages are rebuilt on every render, so object URLs are cached per id.
+const mediaUrls = new Map();
+function mediaUrl(id) {
+  if (!mediaUrls.has(id)) {
+    mediaUrls.set(id, mediaRequest('readonly', store => store.get(id)).then(blob => {
+      if (!blob) throw new Error('Video is missing from browser storage');
+      return URL.createObjectURL(blob);
+    }));
+  }
+  return mediaUrls.get(id);
+}
+
+function deleteMessageMedia(messages) {
+  for (const msg of messages) {
+    if (!msg.video) continue;
+    mediaUrls.get(msg.video.id)?.then(URL.revokeObjectURL, () => {});
+    mediaUrls.delete(msg.video.id);
+    deleteMedia(msg.video.id).catch(err => console.warn('Could not delete video:', err));
+  }
+}
 
 // ---------- DOM ----------
 
@@ -58,6 +105,7 @@ const els = {
   systemPrompt: $('systemPrompt'), temperature: $('temperature'), tempValue: $('tempValue'),
   showThinking: $('showThinking'), imageSize: $('imageSize'), customSize: $('customSize'),
   customWidth: $('customWidth'), customHeight: $('customHeight'), upscaler: $('upscaler'), colorCorrect: $('colorCorrect'), freeVram: $('freeVram'),
+  videoSize: $('videoSize'), videoFrames: $('videoFrames'),
   clearAll: $('clearAll'),
 };
 
@@ -172,6 +220,7 @@ function selectChat(id) {
 
 function deleteChat(id) {
   if (id === state.currentId) stopStreaming();
+  deleteMessageMedia(state.chats.find(c => c.id === id)?.messages || []);
   state.chats = state.chats.filter(c => c.id !== id);
   if (state.currentId === id) state.currentId = null;
   save();
@@ -244,6 +293,29 @@ function buildMessage(msg, isLast) {
       actions.append(download);
     });
     content.before(generated);
+  } else if (msg.video) {
+    const video = document.createElement('video');
+    video.className = 'generated-video';
+    video.controls = true;
+    video.loop = true;
+    video.playsInline = true;
+    content.before(video);
+    const download = document.createElement('button');
+    download.type = 'button';
+    download.textContent = 'Download';
+    actions.append(download);
+    mediaUrl(msg.video.id).then(url => {
+      video.src = url;
+      download.addEventListener('click', () => {
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `video-${Date.now()}.webm`;
+        a.click();
+      });
+    }, err => {
+      video.replaceWith(Object.assign(document.createElement('p'), { className: 'error', textContent: err.message }));
+      download.remove();
+    });
   } else {
     const copy = document.createElement('button');
     copy.type = 'button';
@@ -327,11 +399,13 @@ async function sendMessage(text) {
 async function regenerate() {
   const chat = currentChat();
   if (!chat || abortController) return;
-  if (chat.messages.at(-1)?.role === 'assistant') chat.messages.pop();
+  if (chat.messages.at(-1)?.role === 'assistant') deleteMessageMedia([chat.messages.pop()]);
   await respond(chat);
 }
 
-const respond = chat => (isImageModel(chat.model) ? generateImage(chat) : streamReply(chat));
+const respond = chat => (isVideoModel(chat.model) ? generateVideo(chat)
+  : isImageModel(chat.model) ? generateImage(chat)
+    : streamReply(chat));
 
 async function streamReply(chat) {
   const model = chat.model;
@@ -344,6 +418,9 @@ async function streamReply(chat) {
   const history = chat.messages.slice(0, -1).map(m => {
     if (m.role === 'assistant' && m.images?.length) {
       return { role: 'assistant', content: '[Generated an image for the previous message]' };
+    }
+    if (m.role === 'assistant' && m.video) {
+      return { role: 'assistant', content: '[Generated a video for the previous message]' };
     }
     const out = { role: m.role, content: m.content };
     if (m.images) out.images = m.images;
@@ -470,23 +547,14 @@ async function generateImage(chat) {
       signal,
     });
     jobId = job.id;
-
-    while (true) {
-      const s = await fetchJson(`${server}/v1/jobs/${jobId}`, { signal });
-      if (s.status === 'completed') {
-        reply.images = s.result.images.map(img => img.b64_json);
-        reply.imageFormat = s.result.output_format;
-        break;
-      }
-      if (s.status === 'failed' || s.status === 'cancelled') {
-        throw new Error(s.error?.message || `Image generation ${s.status}`);
-      }
+    const result = await pollJob(server, jobId, signal, s => {
       const secs = Math.round((Date.now() - started) / 1000);
       status.textContent = s.status === 'queued'
         ? `Queued (position ${s.queue_position})…`
         : `${editing ? 'Editing' : 'Generating'} image… ${secs}s`;
-      await sleep(1000, signal);
-    }
+    });
+    reply.images = result.images.map(img => img.b64_json);
+    reply.imageFormat = result.output_format;
   } catch (err) {
     if (err.name === 'AbortError') {
       // The server can only cancel queued jobs; a running one finishes and is discarded.
@@ -506,6 +574,114 @@ async function generateImage(chat) {
   }
 }
 
+// Polls an sd-server job once a second until it finishes; returns its result.
+async function pollJob(server, jobId, signal, onProgress) {
+  while (true) {
+    const s = await fetchJson(`${server}/v1/jobs/${jobId}`, { signal });
+    if (s.status === 'completed') return s.result;
+    if (s.status === 'failed' || s.status === 'cancelled') {
+      throw new Error(s.error?.message || `Generation ${s.status}`);
+    }
+    onProgress(s);
+    await sleep(1000, signal);
+  }
+}
+
+// ---------- Video generation (stable-diffusion.cpp) ----------
+
+async function generateVideo(chat) {
+  const userMsg = chat.messages.findLast(m => m.role === 'user');
+  const server = modelInfo(chat.model)?.server || '/sdcpp-video/sdcpp';
+  const firstFrame = userMsg?.images?.[0];
+  const reply = { role: 'assistant', content: '' };
+  chat.messages.push(reply);
+  renderMessages();
+  const el = [...els.messages.querySelectorAll('.msg')].at(-1);
+  el.querySelector('.msg-actions').style.display = 'none';
+  const content = el.querySelector('.content');
+  content.innerHTML = '<div class="image-pending"><div class="spinner"></div><span></span></div>';
+  const status = content.querySelector('span');
+
+  abortController = new AbortController();
+  const { signal } = abortController;
+  setStreaming(true);
+  const started = Date.now();
+  let jobId = null;
+
+  try {
+    if (state.settings.freeVram) {
+      status.textContent = 'Unloading chat models…';
+      await unloadOllamaModels();
+    }
+    status.textContent = 'Starting…';
+    const [width, height] = firstFrame
+      ? await videoSize(firstFrame)
+      : state.settings.videoSize.split('x').map(Number);
+    const job = await fetchJson(`${server}/v1/vid_gen`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      // Steps, CFG and sampler come from the server's defaults for the loaded model.
+      body: JSON.stringify({
+        prompt: userMsg?.content || '',
+        negative_prompt: 'worst quality, low quality, blurry, distorted, artifacts',
+        width, height, seed: -1,
+        video_frames: state.settings.videoFrames, fps: 24,
+        output_format: 'webm',
+        ...(firstFrame && { init_image: await toFrame(firstFrame, width, height) }),
+      }),
+      signal,
+    });
+    jobId = job.id;
+    const result = await pollJob(server, jobId, signal, s => {
+      const secs = Math.round((Date.now() - started) / 1000);
+      status.textContent = s.status === 'queued'
+        ? `Queued (position ${s.queue_position})…`
+        : `Generating video… ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
+    });
+    const blob = await (await fetch(`data:${result.mime_type};base64,${result.b64_json}`)).blob();
+    const id = crypto.randomUUID?.() || String(Date.now());
+    await putMedia(id, blob);
+    reply.video = { id, mimeType: result.mime_type };
+    reply.content = `${width} × ${height}, ${(result.frame_count / result.fps).toFixed(1)} s`;
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      if (jobId) fetch(`${server}/v1/jobs/${jobId}/cancel`, { method: 'POST' }).catch(() => {});
+    } else {
+      reply.error = err.message;
+    }
+  } finally {
+    abortController = null;
+    setStreaming(false);
+    if (!reply.video && !reply.error) reply.content = '_(stopped)_';
+    save();
+    renderMessages();
+  }
+}
+
+// Image-to-video keeps the first frame's aspect ratio at the pixel area of
+// the configured video size, in multiples of 32.
+async function videoSize(b64) {
+  const img = await loadImage(`data:image/*;base64,${b64}`);
+  const [w, h] = state.settings.videoSize.split('x').map(Number);
+  const scale = Math.sqrt((w * h) / (img.naturalWidth * img.naturalHeight));
+  const round32 = n => Math.max(256, Math.round((n * scale) / 32) * 32);
+  return [round32(img.naturalWidth), round32(img.naturalHeight)];
+}
+
+// The first frame must be RGB at the video's size; returns base64 JPEG.
+async function toFrame(b64, width, height) {
+  const img = await loadImage(`data:image/*;base64,${b64}`);
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, width, height);
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(img, 0, 0, width, height);
+  return canvas.toDataURL('image/jpeg', 0.95).split(',')[1];
+}
+
 // Attached images are upscaled with the server's ESRGAN model instead of
 // being used as a prompt. The endpoint is synchronous, so there is no job to poll.
 async function upscaleImages(images, reply, status, signal) {
@@ -515,13 +691,13 @@ async function upscaleImages(images, reply, status, signal) {
   const notes = [];
   for (const [i, image] of images.entries()) {
     const of = images.length > 1 ? ` image ${i + 1} of ${images.length}` : '';
-    let source = image;
+    // Shrink first so color correction works on (and the request carries) at most 2048 px.
+    const fit = await fitForUpscale(image);
+    let source = fit.b64;
     if (state.settings.colorCorrect) {
       status.textContent = `Color correcting${of}…`;
-      source = await autoColor(image);
+      source = await autoColor(source);
     }
-    const fit = await fitForUpscale(source);
-    source = fit.b64;
     status.textContent = `Upscaling${of}…`;
     const r = await fetchJson('/sdcpp/v1/upscale', {
       method: 'POST',
@@ -740,14 +916,15 @@ async function loadChatModels() {
 }
 
 // Each sd-server loads a single model at startup; offer it if it's up.
-async function loadSdModel(server, capabilities, suffix) {
+async function loadSdModel(server, capabilities, suffix, mode = 'img_gen') {
   try {
     const caps = await fetchJson(`${server}/v1/capabilities`);
-    if (!caps.supported_modes?.includes('img_gen')) return [];
+    if (!caps.supported_modes?.includes(mode)) return [];
     const { stem } = caps.model;
-    return [{ name: `image:${stem}`, label: `${stem}${suffix}`, capabilities, server }];
+    const kind = mode === 'vid_gen' ? 'video' : 'image';
+    return [{ name: `${kind}:${stem}`, label: `${stem}${suffix}`, capabilities, server }];
   } catch (err) {
-    console.info(`Image server at ${server} unavailable:`, err.message);
+    console.info(`Server at ${server} unavailable:`, err.message);
     return [];
   }
 }
@@ -761,8 +938,10 @@ async function loadImageModels() {
 }
 
 async function loadModels() {
-  const [chatModels, imageModels] = await Promise.all([loadChatModels(), loadImageModels()]);
-  state.models = [...chatModels, ...imageModels];
+  const [chatModels, imageModels, videoModels] = await Promise.all([
+    loadChatModels(), loadImageModels(), loadSdModel('/sdcpp-video/sdcpp', ['video'], '', 'vid_gen'),
+  ]);
+  state.models = [...chatModels, ...imageModels, ...videoModels];
 
   els.modelSelect.innerHTML = '';
   if (!state.models.length) {
@@ -771,7 +950,7 @@ async function loadModels() {
     state.settings.model = '';
     return;
   }
-  for (const [label, models] of [['Chat', chatModels], ['Image', imageModels]]) {
+  for (const [label, models] of [['Chat', chatModels], ['Image', imageModels], ['Video', videoModels]]) {
     if (!models.length) continue;
     const group = document.createElement('optgroup');
     group.label = label;
@@ -787,14 +966,16 @@ function updateComposerForModel() {
   // /api/tags only reports capabilities on newer Ollama; if absent, allow attaching.
   const info = modelInfo(state.settings.model);
   const canAttach = !info?.capabilities.length || info.capabilities.includes('vision')
-    || isImageModel(state.settings.model);
+    || isImageModel(state.settings.model) || isVideoModel(state.settings.model);
   els.attachLabel.style.display = canAttach ? '' : 'none';
   if (!canAttach) clearAttachments();
-  els.input.placeholder = isEditModel(state.settings.model)
-    ? 'Describe an image to generate, or attach one and say how to change it'
-    : isImageModel(state.settings.model)
-      ? 'Describe an image to generate, or attach one to upscale'
-      : 'Message Ollama';
+  els.input.placeholder = isVideoModel(state.settings.model)
+    ? 'Describe a video to generate, or attach a first frame to animate'
+    : isEditModel(state.settings.model)
+      ? 'Describe an image to generate, or attach one and say how to change it'
+      : isImageModel(state.settings.model)
+        ? 'Describe an image to generate, or attach one to upscale'
+        : 'Message Ollama';
 }
 
 // ---------- Attachments ----------
@@ -853,6 +1034,8 @@ function openSettings() {
   els.upscaler.value = state.settings.upscaler;
   els.colorCorrect.checked = state.settings.colorCorrect;
   els.freeVram.checked = state.settings.freeVram;
+  els.videoSize.value = state.settings.videoSize;
+  els.videoFrames.value = state.settings.videoFrames;
   els.settingsDialog.showModal();
 }
 
@@ -880,6 +1063,8 @@ els.settingsDialog.addEventListener('close', () => {
   state.settings.upscaler = els.upscaler.value;
   state.settings.colorCorrect = els.colorCorrect.checked;
   state.settings.freeVram = els.freeVram.checked;
+  state.settings.videoSize = els.videoSize.value;
+  state.settings.videoFrames = Number(els.videoFrames.value);
   save();
   renderMessages();
 });
@@ -887,6 +1072,7 @@ els.settingsDialog.addEventListener('close', () => {
 els.clearAll.addEventListener('click', () => {
   if (!confirm('Delete all chats? This cannot be undone.')) return;
   stopStreaming();
+  deleteMessageMedia(state.chats.flatMap(c => c.messages));
   state.chats = [];
   state.currentId = null;
   save();
