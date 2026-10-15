@@ -620,10 +620,10 @@ async function generateVideo(chat) {
     const job = await fetchJson(`${server}/v1/vid_gen`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      // Steps, CFG and sampler come from the server's defaults for the loaded model.
+      // Steps, CFG, sampler and negative prompt come from the server's defaults
+      // for the loaded model, since LTX and Wan want different ones.
       body: JSON.stringify({
         prompt: userMsg?.content || '',
-        negative_prompt: 'worst quality, low quality, blurry, distorted, artifacts',
         width, height, seed: -1,
         video_frames: state.settings.videoFrames, fps: 24,
         output_format: 'webm',
@@ -937,9 +937,17 @@ async function loadImageModels() {
   return servers.flat();
 }
 
+async function loadVideoModels() {
+  const servers = await Promise.all([
+    loadSdModel('/sdcpp-video/sdcpp', ['video'], ' (with audio)', 'vid_gen'),
+    loadSdModel('/sdcpp-wan/sdcpp', ['video'], '', 'vid_gen'),
+  ]);
+  return servers.flat();
+}
+
 async function loadModels() {
   const [chatModels, imageModels, videoModels] = await Promise.all([
-    loadChatModels(), loadImageModels(), loadSdModel('/sdcpp-video/sdcpp', ['video'], '', 'vid_gen'),
+    loadChatModels(), loadImageModels(), loadVideoModels(),
   ]);
   state.models = [...chatModels, ...imageModels, ...videoModels];
 

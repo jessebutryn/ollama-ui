@@ -48,6 +48,14 @@ server {
         proxy_send_timeout 600s;
     }
 
+    # Fourth stable-diffusion.cpp server (Wan video), prefix stripped likewise.
+    location /sdcpp-wan/ {
+        proxy_pass ${SD_WAN_URL}/;
+        proxy_http_version 1.1;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+    }
+
     location / {
         try_files $uri $uri/ /index.html;
     }

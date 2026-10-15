@@ -1,6 +1,6 @@
 # Ollama UI
 
-A lightweight ChatGPT-style web interface for a local [Ollama](https://ollama.com) server, served by nginx in a Docker container. Image generation and upscaling run alongside it in a [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) container using Z-Image-Turbo, image editing in a second one using FLUX.2 klein 9B, and video generation (with audio) in a third using LTX-2.3 22B.
+A lightweight ChatGPT-style web interface for a local [Ollama](https://ollama.com) server, served by nginx in a Docker container. Image generation and upscaling run alongside it in a [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) container using Z-Image-Turbo, image editing in a second one using FLUX.2 klein 9B, and video generation in two more: LTX-2.3 22B (with audio) and Wan 2.2 TI2V 5B.
 
 ## Run
 
@@ -12,7 +12,7 @@ Then open http://localhost:3000.
 
 The container uses host networking and proxies `/api/*` to Ollama at `http://127.0.0.1:11434`, so Ollama needs no extra configuration.
 
-The first `up` takes a while: it compiles stable-diffusion.cpp with CUDA (~15–30 min) and downloads ~27 GB of image model weights into the `image-models` Docker volume (~28 GB more with video enabled; see below). The video download runs separately, so image generation is available before it finishes. Later starts reuse both.
+The first `up` takes a while: it compiles stable-diffusion.cpp with CUDA (~15–30 min) and downloads ~27 GB of image model weights into the `image-models` Docker volume (~35 GB more with video enabled; see below). The video download runs separately, so image generation is available before it finishes. Later starts reuse both.
 
 ## Image generation
 
@@ -28,9 +28,12 @@ Pick the model marked **(edit)**, attach an image and describe the change, e.g. 
 
 ## Video generation
 
-Pick the model under **Video** and describe the clip, including any sound you want (dialogue, music, ambience): LTX-2.3 generates a matching audio track. Attach an image to use it as the first frame (image-to-video); the video keeps its aspect ratio. Size and length are in Settings (default 1280 × 720, 5 seconds at 24 fps). The `video-server` service runs LTX-2.3 22B dev (UD-Q4_K_M) with Gemma 3 12B as its text encoder.
+Pick a model under **Video** and describe the clip. Attach an image to use it as the first frame (image-to-video); the video keeps its aspect ratio. Size and length are in Settings (default 1280 × 720, 5 seconds at 24 fps). There are two models:
 
-Expect generation to take minutes, not seconds; the Draft size is much faster for trying prompts. Videos are WebM (VP8 with PCM audio) and are stored in the browser's IndexedDB rather than localStorage, since each is several MB.
+- **LTX-2.3 (with audio)**, the `video-server` service: generates a matching audio track, so describe any sound you want (dialogue, music, ambience). It runs the 22B distilled model at Q3_K_S (8 steps, no CFG) with Gemma 3 12B as its text encoder, sized to fit a 16 GB GPU.
+- **Wan 2.2 TI2V 5B**, the `wan-server` service: no audio, but much lighter and faster.
+
+Expect generation to take minutes, not seconds; the Draft size is much faster for trying prompts. All the servers share one GPU, so run one generation at a time: the UI waits for each job before allowing the next, but two browser tabs or users generating at once can run the GPU out of memory. Videos are WebM (VP8 with PCM audio) and are stored in the browser's IndexedDB rather than localStorage, since each is several MB.
 
 
 The image server needs GPU access from Docker, which requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). On Ubuntu / Linux Mint:
@@ -52,7 +55,7 @@ The CUDA kernels are compiled for RTX 30-series cards (`sm_86`). For another GPU
 
 The servers load their weights from the model files only while generating and release them afterwards (`--params-backend disk`), so idle servers use almost no RAM or VRAM, and they fit alongside Ollama on a 16 GB machine. Each job starts by reading its model from disk, so keep the `image-models` volume on an SSD. Before each image or video, the UI asks Ollama to unload any chat models so the two don't compete for VRAM; the next chat message reloads the chat model. You can turn this off in Settings if your GPU has room for both.
 
-To run without image generation, start only the UI: `docker compose up -d --build ollama-ui`. Video is off by default because of its ~28 GB download. To turn it on, put `COMPOSE_PROFILES=video` in a `.env` file next to `docker-compose.yml`, or run `docker compose --profile video up -d`.
+To run without image generation, start only the UI: `docker compose up -d --build ollama-ui`. Video is off by default because of its ~35 GB download. To turn it on, put `COMPOSE_PROFILES=video` in a `.env` file next to `docker-compose.yml`, or run `docker compose --profile video up -d`.
 
 ## Configuration
 
@@ -63,7 +66,8 @@ Environment variables (set in `docker-compose.yml`):
 | `OLLAMA_URL`  | `http://127.0.0.1:11434` | Where the Ollama API lives   |
 | `SD_URL`      | `http://127.0.0.1:7861`  | Where the image server lives |
 | `SD_EDIT_URL` | `http://127.0.0.1:7862`  | Where the edit server lives  |
-| `SD_VIDEO_URL`| `http://127.0.0.1:7863`  | Where the video server lives |
+| `SD_VIDEO_URL`| `http://127.0.0.1:7863`  | Where the LTX video server lives |
+| `SD_WAN_URL`  | `http://127.0.0.1:7864`  | Where the Wan video server lives |
 | `LISTEN_PORT` | `3000`                   | Port the UI is served on     |
 
 ### Without host networking (e.g. Docker Desktop on macOS/Windows)
@@ -90,6 +94,6 @@ On Linux this also requires Ollama to listen on more than loopback (`OLLAMA_HOST
 - Collapsible "thinking" output for reasoning models (e.g. qwen3, gemma4)
 - Image attachments (upload or paste) for vision models
 - Image generation with Z-Image-Turbo (stable-diffusion.cpp)
-- Video generation with audio using LTX-2.3
+- Video generation with LTX-2.3 (with audio) and Wan 2.2
 - System prompt and temperature settings
 - Regenerate last reply

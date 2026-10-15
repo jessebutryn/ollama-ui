@@ -11,6 +11,7 @@ services:
       SD_URL: http://127.0.0.1:7861
       SD_EDIT_URL: http://127.0.0.1:7862
       SD_VIDEO_URL: http://127.0.0.1:7863
+      SD_WAN_URL: http://127.0.0.1:7864
       LISTEN_PORT: 3000
 
   # One-shot job: downloads the image model weights into the `image-models`
@@ -123,10 +124,10 @@ services:
               count: all
               capabilities: [gpu]
 
-  # Video is opt-in because of its ~28 GB download. Enable it with
+  # Video is opt-in because of its ~35 GB download. Enable it with
   # COMPOSE_PROFILES=video (e.g. in .env).
 
-  # Downloads the video model weights (~28 GB) separately, so the image servers
+  # Downloads the video model weights (~35 GB) separately, so the image servers
   # don't wait on them.
   video-models:
     profiles: [video]
@@ -137,8 +138,9 @@ services:
       - ./image-server/fetch-models.sh:/fetch-models.sh:ro
     entrypoint: ["/bin/sh", "/fetch-models.sh", "video"]
 
-  # Third stable-diffusion.cpp server running LTX-2.3 22B, which generates video
-  # with audio from text or from an attached first frame. Same image as image-server.
+  # Third stable-diffusion.cpp server running LTX-2.3 22B distilled, which
+  # generates video with audio from text or from an attached first frame.
+  # Same image as image-server.
   video-server:
     profiles: [video]
     image: sd-server-cuda:3f8527a
@@ -159,7 +161,7 @@ services:
       - --listen-port
       - "7863"
       - --diffusion-model
-      - /models/ltx/ltx-2.3-22b-dev-UD-Q4_K_M.gguf
+      - /models/ltx/ltx-2.3-22b-distilled-1.1-Q3_K_S.gguf
       - --vae
       - /models/ltx/ltx-2.3-22b-dev_video_vae.safetensors
       - --audio-vae
@@ -168,8 +170,13 @@ services:
       - /models/ltx/gemma-3-12b-it-qat-UD-Q4_K_XL.gguf
       - --embeddings-connectors
       - /models/ltx/ltx-2.3-22b-dev_embeddings_connectors.safetensors
+      # The distilled model's fixed 8-step schedule, with no CFG.
+      - --steps
+      - "8"
+      - --sigmas
+      - "1.0,0.99375,0.9875,0.98125,0.975,0.909375,0.725,0.421875,0.0"
       - --cfg-scale
-      - "6.0"
+      - "1.0"
       - --sampling-method
       - euler
       - --width
@@ -178,6 +185,56 @@ services:
       - "720"
       - --video-frames
       - "121"
+      - --fps
+      - "24"
+      - --diffusion-fa
+      # Weights load from disk per job, like image-server.
+      - --params-backend
+      - disk
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Fourth stable-diffusion.cpp server running Wan 2.2 TI2V 5B: video without
+  # audio, from text or an attached first frame. Much lighter than LTX.
+  wan-server:
+    profiles: [video]
+    image: sd-server-cuda:3f8527a
+    container_name: wan-server
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      video-models:
+        condition: service_completed_successfully
+      image-server:
+        condition: service_started
+    volumes:
+      - image-models:/models:ro
+    entrypoint: ["/sd-server"]
+    command:
+      - --listen-ip
+      - "127.0.0.1"
+      - --listen-port
+      - "7864"
+      - --diffusion-model
+      - /models/wan/Wan2.2-TI2V-5B-Q8_0.gguf
+      - --vae
+      - /models/wan/wan2.2_vae.safetensors
+      - --t5xxl
+      - /models/wan/umt5-xxl-encoder-Q8_0.gguf
+      - --cfg-scale
+      - "6.0"
+      - --sampling-method
+      - euler
+      - --flow-shift
+      - "3.0"
+      # Wan's standard negative prompt (it was trained with a Chinese one).
+      - --negative-prompt
+      - 色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走
       - --fps
       - "24"
       - --diffusion-fa
