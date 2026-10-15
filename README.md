@@ -50,9 +50,9 @@ The CUDA kernels are compiled for RTX 30-series cards (`sm_86`). For another GPU
 
 ### GPU memory
 
-The image, edit and video models are kept in system RAM (about 55 GB between them) and only moved onto the GPU while generating (`--offload-to-cpu`). Before each image or video, the UI asks Ollama to unload any chat models so the two don't compete for VRAM; the next chat message reloads the chat model. You can turn this off in Settings if your GPU has room for both.
+The servers load their weights from the model files only while generating and release them afterwards (`--params-backend disk`), so idle servers use almost no RAM or VRAM, and they fit alongside Ollama on a 16 GB machine. Each job starts by reading its model from disk, so keep the `image-models` volume on an SSD. Before each image or video, the UI asks Ollama to unload any chat models so the two don't compete for VRAM; the next chat message reloads the chat model. You can turn this off in Settings if your GPU has room for both.
 
-To run without image generation, start only the UI: `docker compose up -d --build ollama-ui`. Video is off by default because it needs about 26 GB more system RAM than the rest (roughly 64 GB in total with Ollama). To turn it on, put `COMPOSE_PROFILES=video` in a `.env` file next to `docker-compose.yml`, or run `docker compose --profile video up -d`.
+To run without image generation, start only the UI: `docker compose up -d --build ollama-ui`. Video is off by default because of its ~28 GB download. To turn it on, put `COMPOSE_PROFILES=video` in a `.env` file next to `docker-compose.yml`, or run `docker compose --profile video up -d`.
 
 ## Configuration
 

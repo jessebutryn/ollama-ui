@@ -65,9 +65,11 @@ services:
       # ESRGAN models for upscaling attached images.
       - --hires-upscalers-dir
       - /models/upscalers
-      # Keep weights in system RAM and move them to the GPU only while
-      # generating, so the GPU stays free for Ollama the rest of the time.
-      - --offload-to-cpu
+      # Read weights from the model files only while a job runs and release them
+      # afterwards, so an idle server holds neither RAM nor VRAM. That lets all
+      # the servers and Ollama share one machine; each job pays a disk read.
+      - --params-backend
+      - disk
     deploy:
       resources:
         reservations:
@@ -110,7 +112,9 @@ services:
       - --sampling-method
       - euler
       - --diffusion-fa
-      - --offload-to-cpu
+      # Weights load from disk per job, like image-server.
+      - --params-backend
+      - disk
     deploy:
       resources:
         reservations:
@@ -119,9 +123,8 @@ services:
               count: all
               capabilities: [gpu]
 
-  # Video is opt-in: its weights take ~26 GB of system RAM on top of the image
-  # and edit servers' ~27 GB, more than a 32 GB machine has. Enable it with
-  # COMPOSE_PROFILES=video (e.g. in .env) on hosts with the memory for it.
+  # Video is opt-in because of its ~28 GB download. Enable it with
+  # COMPOSE_PROFILES=video (e.g. in .env).
 
   # Downloads the video model weights (~28 GB) separately, so the image servers
   # don't wait on them.
@@ -178,7 +181,9 @@ services:
       - --fps
       - "24"
       - --diffusion-fa
-      - --offload-to-cpu
+      # Weights load from disk per job, like image-server.
+      - --params-backend
+      - disk
     deploy:
       resources:
         reservations:
