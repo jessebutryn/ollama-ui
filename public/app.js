@@ -534,7 +534,12 @@ async function generateImage(chat) {
     const { transparent } = state.settings;
     // The models can't output alpha, so ask for a flat chroma-key background
     // and remove it afterwards.
-    const prompt = (userMsg?.content || '') + (transparent
+    // Asking the model itself for transparency makes it paint a checkerboard,
+    // so that wording is dropped.
+    const asked = userMsg?.content || '';
+    const prompt = (transparent
+      ? asked.replace(/,?\s*(on|with|against)?\s*(an?\s+)?transparent(\s+(background|bg|png))?/gi, '')
+      : asked) + (transparent
       ? '. Isolated on a solid flat pure bright green (#00FF00) chroma key background, even lighting, no shadows.'
       : '');
     const [width, height] = editing
