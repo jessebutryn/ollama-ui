@@ -531,7 +531,8 @@ async function generateImage(chat) {
       return;
     }
     status.textContent = 'Starting…';
-    const { transparent } = state.settings;
+    // Asking for transparency in the prompt turns it on without the setting.
+    const transparent = state.settings.transparent || /\btransparent\b/i.test(userMsg?.content || '');
     // The models can't output alpha, so ask for a flat chroma-key background
     // and remove it afterwards.
     // Asking the model itself for transparency makes it paint a checkerboard,
@@ -570,6 +571,7 @@ async function generateImage(chat) {
       status.textContent = 'Removing background…';
       reply.images = await Promise.all(result.images.map(img => removeBackground(img.b64_json)));
       reply.imageFormat = 'png';
+      reply.content = 'Background removed';
     } else {
       reply.images = result.images.map(img => img.b64_json);
       reply.imageFormat = result.output_format;
