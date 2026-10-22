@@ -13,7 +13,7 @@ const state = {
   settings: {
     model: '', systemPrompt: '', temperature: 0.7, showThinking: true,
     imageSize: '1024x1024', upscaler: 'RealESRNet_x4plus', colorCorrect: true,
-    freeVram: true, videoSize: '1280x720', videoFrames: 121,
+    freeVram: true, videoSize: '1280x720', videoFrames: 121, transparent: false,
   },
 };
 
@@ -105,6 +105,7 @@ const els = {
   systemPrompt: $('systemPrompt'), temperature: $('temperature'), tempValue: $('tempValue'),
   showThinking: $('showThinking'), imageSize: $('imageSize'), customSize: $('customSize'),
   customWidth: $('customWidth'), customHeight: $('customHeight'), upscaler: $('upscaler'), colorCorrect: $('colorCorrect'), freeVram: $('freeVram'),
+  transparent: $('transparent'),
   videoSize: $('videoSize'), videoFrames: $('videoFrames'),
   clearAll: $('clearAll'),
 };
@@ -530,7 +531,12 @@ async function generateImage(chat) {
       return;
     }
     status.textContent = 'Starting…';
-    const prompt = userMsg?.content || '';
+    const { transparent } = state.settings;
+    // The models can't output alpha, so ask for a flat chroma-key background
+    // and remove it afterwards.
+    const prompt = (userMsg?.content || '') + (transparent
+      ? '. Isolated on a solid flat pure bright green (#00FF00) chroma key background, even lighting, no shadows.'
+      : '');
     const [width, height] = editing
       ? await editSize(userMsg.images[0])
       : state.settings.imageSize.split('x').map(Number);
@@ -539,7 +545,9 @@ async function generateImage(chat) {
       headers: { 'Content-Type': 'application/json' },
       // Steps, CFG and sampler come from the server's defaults for the loaded model.
       body: JSON.stringify({
-        prompt, width, height, seed: -1, output_format: 'jpeg', output_compression: 92,
+        prompt, width, height, seed: -1,
+        // Keying needs lossless pixels; JPEG artifacts would leave a fringe.
+        output_format: transparent ? 'png' : 'jpeg', output_compression: transparent ? 100 : 92,
         ...(editing && { ref_images: userMsg.images }),
         // Decoding very large images in one pass can run out of VRAM.
         ...(width * height > 1536 * 1536 && { vae_tiling_params: { enabled: true } }),
@@ -553,8 +561,14 @@ async function generateImage(chat) {
         ? `Queued (position ${s.queue_position})…`
         : `${editing ? 'Editing' : 'Generating'} image… ${secs}s`;
     });
-    reply.images = result.images.map(img => img.b64_json);
-    reply.imageFormat = result.output_format;
+    if (transparent) {
+      status.textContent = 'Removing background…';
+      reply.images = await Promise.all(result.images.map(img => removeBackground(img.b64_json)));
+      reply.imageFormat = 'png';
+    } else {
+      reply.images = result.images.map(img => img.b64_json);
+      reply.imageFormat = result.output_format;
+    }
   } catch (err) {
     if (err.name === 'AbortError') {
       // The server can only cancel queued jobs; a running one finishes and is discarded.
@@ -780,6 +794,59 @@ async function autoColor(b64) {
     px[i] = luts[0][px[i]];
     px[i + 1] = luts[1][px[i + 1]];
     px[i + 2] = luts[2][px[i + 2]];
+  }
+  ctx.putImageData(data, 0, 0);
+  return canvas.toDataURL('image/png').split(',')[1];
+}
+
+// Chroma key: makes the background transparent, taking its color from the
+// image border. Pixels close to that color seed a flood fill, so the subject's
+// own similar colors survive unless they touch the background; along the edge
+// alpha ramps with color distance and the background is unmixed from the
+// foreground color, which removes the green fringe. Returns base64 PNG.
+async function removeBackground(b64) {
+  const img = await loadImage(`data:image/png;base64,${b64}`);
+  const w = img.naturalWidth, h = img.naturalHeight;
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0);
+  const data = ctx.getImageData(0, 0, w, h);
+  const px = data.data;
+
+  const border = [[], [], []];
+  const sample = i => { for (let c = 0; c < 3; c++) border[c].push(px[i * 4 + c]); };
+  for (let x = 0; x < w; x++) { sample(x); sample((h - 1) * w + x); }
+  for (let y = 0; y < h; y++) { sample(y * w); sample(y * w + w - 1); }
+  const bg = border.map(v => v.sort((a, b) => a - b)[v.length >> 1]);
+
+  // Below `lo` a pixel is background; above `hi` it is foreground.
+  const lo = 60, hi = 140;
+  const dist = new Float32Array(w * h);
+  const queue = new Int32Array(w * h);
+  const seen = new Uint8Array(w * h);
+  let tail = 0;
+  for (let p = 0; p < w * h; p++) {
+    const i = p * 4;
+    dist[p] = Math.hypot(px[i] - bg[0], px[i + 1] - bg[1], px[i + 2] - bg[2]);
+    if (dist[p] < lo) { seen[p] = 1; queue[tail++] = p; }
+  }
+  for (let head = 0; head < tail; head++) {
+    const p = queue[head], x = p % w;
+    for (const n of [x > 0 && p - 1, x < w - 1 && p + 1, p >= w && p - w, p < w * (h - 1) && p + w]) {
+      if (n !== false && !seen[n] && dist[n] < hi) { seen[n] = 1; queue[tail++] = n; }
+    }
+  }
+
+  for (let p = 0; p < w * h; p++) {
+    if (!seen[p]) continue;
+    const i = p * 4;
+    const a = Math.min(1, Math.max(0, (dist[p] - lo) / (hi - lo)));
+    for (let c = 0; c < 3; c++) {
+      if (a > 0) px[i + c] = (px[i + c] - (1 - a) * bg[c]) / a;
+    }
+    px[i + 3] = a * 255;
   }
   ctx.putImageData(data, 0, 0);
   return canvas.toDataURL('image/png').split(',')[1];
@@ -1042,6 +1109,7 @@ function openSettings() {
   els.upscaler.value = state.settings.upscaler;
   els.colorCorrect.checked = state.settings.colorCorrect;
   els.freeVram.checked = state.settings.freeVram;
+  els.transparent.checked = state.settings.transparent;
   els.videoSize.value = state.settings.videoSize;
   els.videoFrames.value = state.settings.videoFrames;
   els.settingsDialog.showModal();
@@ -1071,6 +1139,7 @@ els.settingsDialog.addEventListener('close', () => {
   state.settings.upscaler = els.upscaler.value;
   state.settings.colorCorrect = els.colorCorrect.checked;
   state.settings.freeVram = els.freeVram.checked;
+  state.settings.transparent = els.transparent.checked;
   state.settings.videoSize = els.videoSize.value;
   state.settings.videoFrames = Number(els.videoFrames.value);
   save();
