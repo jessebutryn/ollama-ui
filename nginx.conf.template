@@ -57,6 +57,9 @@ server {
     }
 
     location / {
+        # Revalidate the UI files on every load (cheap 304s via ETag), so a
+        # rebuild takes effect without a hard refresh.
+        add_header Cache-Control no-cache;
         try_files $uri $uri/ /index.html;
     }
 }
