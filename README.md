@@ -60,7 +60,7 @@ The CUDA kernels are compiled for RTX 30-series cards (`sm_86`). For another GPU
 
 The servers load their weights from the model files only while generating and release them afterwards (`--params-backend disk`), so idle servers use almost no RAM or VRAM, and they fit alongside Ollama on a 16 GB machine. Each job starts by reading its model from disk, so keep the `image-models` volume on an SSD. Before each image or video, the UI asks Ollama to unload any chat models so the two don't compete for VRAM; the next chat message reloads the chat model. You can turn this off in Settings if your GPU has room for both.
 
-To run without image generation, start only the UI: `docker compose up -d --build ollama-ui`. Video is off by default because of its ~35 GB download. To turn it on, put `COMPOSE_PROFILES=video` in a `.env` file next to `docker-compose.yml`, or run `docker compose --profile video up -d`.
+To run without image generation, start only the UI and Ollama: `docker compose up -d --build ollama-ui ollama ollama-models`. Video is off by default because of its ~35 GB download. To turn it on, put `COMPOSE_PROFILES=video` in a `.env` file next to `docker-compose.yml`, or run `docker compose --profile video up -d`.
 
 ## Configuration
 
@@ -75,20 +75,23 @@ Environment variables (set in `docker-compose.yml`):
 | `SD_WAN_URL`  | `http://127.0.0.1:7864`  | Where the Wan video server lives |
 | `LISTEN_PORT` | `3000`                   | Port the UI is served on     |
 
-### Without host networking (e.g. Docker Desktop on macOS/Windows)
+### Without host networking (e.g. Docker Desktop on Windows)
 
-Replace `network_mode: host` with a port mapping and point at the host gateway:
+Remove `network_mode: host` from every service so they share Compose's default network, publish the UI's port, and point the UI at the other services by name:
 
 ```yaml
+  ollama-ui:
     ports:
       - "3000:3000"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     environment:
-      OLLAMA_URL: http://host.docker.internal:11434
+      OLLAMA_URL: http://ollama:11434
+      SD_URL: http://image-server:7861
+      SD_EDIT_URL: http://edit-server:7862
+      SD_VIDEO_URL: http://video-server:7863
+      SD_WAN_URL: http://wan-server:7864
 ```
 
-Do the same for the `ollama` service and set its `OLLAMA_HOST` to `0.0.0.0:11434`, so the UI container can reach it.
+The backends must then listen on all interfaces of their container: set `OLLAMA_HOST` to `0.0.0.0:11434` on the `ollama` service and `http://ollama:11434` on the `ollama-models` job, and change each sd-server's `--listen-ip` to `0.0.0.0`. They stay reachable only from the UI container, since only port 3000 is published.
 
 ## Features
 
@@ -102,3 +105,11 @@ Do the same for the `ollama` service and set its `OLLAMA_HOST` to `0.0.0.0:11434
 - Video generation with LTX-2.3 (with audio) and Wan 2.2
 - System prompt and temperature settings
 - Regenerate last reply
+
+## License
+
+Copyright (C) 2026 Jesse Butryn
+
+This project is licensed under the [GNU Affero General Public License v3.0](LICENSE). If you run a modified version as a network service, you must make your modified source available to its users.
+
+The models this project downloads and runs have their own licenses. FLUX.2 klein 9B, for example, is non-commercial.
