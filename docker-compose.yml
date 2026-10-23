@@ -14,6 +14,44 @@ services:
       SD_WAN_URL: http://127.0.0.1:7864
       LISTEN_PORT: 3000
 
+  # Ollama serves the chat models. It listens on loopback only, like the
+  # sd-servers, so stop any Ollama installed on the host (it uses the same port).
+  # The tag is unpinned because new model families often need a newer Ollama.
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      OLLAMA_HOST: 127.0.0.1:11434
+    volumes:
+      - ollama-models:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # One-shot job: pulls the chat models in CHAT_MODELS (space-separated, set in .env) once
+  # Ollama is up. Models already pulled are only checked for updates.
+  ollama-models:
+    image: ollama/ollama:latest
+    network_mode: host
+    depends_on:
+      ollama:
+        condition: service_started
+    environment:
+      OLLAMA_HOST: 127.0.0.1:11434
+      CHAT_MODELS: ${CHAT_MODELS:-qwen3:8b}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        until ollama list >/dev/null 2>&1; do sleep 1; done
+        for m in $$CHAT_MODELS; do ollama pull "$$m"; done
+
   # One-shot job: downloads the image model weights into the `image-models`
   # volume on first run, and skips files that are already there.
   image-models:
@@ -251,3 +289,4 @@ services:
 
 volumes:
   image-models:
+  ollama-models:

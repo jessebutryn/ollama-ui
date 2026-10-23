@@ -1,6 +1,6 @@
 # Ollama UI
 
-A lightweight ChatGPT-style web interface for a local [Ollama](https://ollama.com) server, served by nginx in a Docker container. Image generation and upscaling run alongside it in a [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) container using Z-Image-Turbo, image editing in a second one using FLUX.2 klein 9B, and video generation in two more: LTX-2.3 22B (with audio) and Wan 2.2 TI2V 5B.
+A lightweight ChatGPT-style web interface for [Ollama](https://ollama.com), served by nginx. Everything runs in Docker: Ollama itself runs in a container too. Image generation and upscaling run alongside it in a [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) container using Z-Image-Turbo, image editing in a second one using FLUX.2 klein 9B, and video generation in two more: LTX-2.3 22B (with audio) and Wan 2.2 TI2V 5B.
 
 ## Run
 
@@ -10,7 +10,11 @@ docker compose up -d --build
 
 Then open http://localhost:3000.
 
-The container uses host networking and proxies `/api/*` to Ollama at `http://127.0.0.1:11434`, so Ollama needs no extra configuration.
+The only host requirements are Linux, Docker with Compose, and an NVIDIA GPU with the [NVIDIA Container Toolkit](#gpu-setup).
+
+The `ollama` service runs the chat models, and the `ollama-models` job pulls `qwen3:8b` on first start. To pull others, list them in a `.env` file next to `docker-compose.yml`, e.g. `CHAT_MODELS="qwen3:8b gemma3:12b"`, or pull one any time with `docker exec ollama ollama pull <model>`. Models are kept in the `ollama-models` volume.
+
+Ollama listens on `127.0.0.1:11434` with host networking, so stop any Ollama already installed on the host first (`sudo systemctl disable --now ollama`), or the two will clash over the port. Models it had pulled aren't shared with the container and need pulling again.
 
 The first `up` takes a while: it compiles stable-diffusion.cpp with CUDA (~15–30 min) and downloads ~27 GB of image model weights into the `image-models` Docker volume (~35 GB more with video enabled; see below). The video download runs separately, so image generation is available before it finishes. Later starts reuse both.
 
@@ -35,8 +39,9 @@ Pick a model under **Video** and describe the clip. Attach an image to use it as
 
 Expect generation to take minutes, not seconds; the Draft size is much faster for trying prompts. All the servers share one GPU, so run one generation at a time: the UI waits for each job before allowing the next, but two browser tabs or users generating at once can run the GPU out of memory. Videos are WebM (VP8 with PCM audio) and are stored in the browser's IndexedDB rather than localStorage, since each is several MB.
 
+## GPU setup
 
-The image server needs GPU access from Docker, which requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). On Ubuntu / Linux Mint:
+Ollama and the image servers need GPU access from Docker, which requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). On Ubuntu / Linux Mint:
 
 ```sh
 curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
@@ -83,7 +88,7 @@ Replace `network_mode: host` with a port mapping and point at the host gateway:
       OLLAMA_URL: http://host.docker.internal:11434
 ```
 
-On Linux this also requires Ollama to listen on more than loopback (`OLLAMA_HOST=0.0.0.0` in the Ollama service environment).
+Do the same for the `ollama` service and set its `OLLAMA_HOST` to `0.0.0.0:11434`, so the UI container can reach it.
 
 ## Features
 
